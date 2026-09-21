@@ -22,6 +22,7 @@ interface Resolution {
   newMainName: string;
   oldLeadingSetKey: string | null;
   newLeadingTypeKeys: Partial<Record<LeadingType, LeadingKeyInfo>>;
+  newLeadingSetKey: string | null;
   newActionKey: LeadingKeyInfo | null;
   diagnostics: string[];
 }
@@ -395,14 +396,14 @@ async function resolveComponentSetFromNode(node: BaseNode): Promise<ComponentSet
   return null;
 }
 
-async function resolveLeadingSet(nodeId: string): Promise<Partial<Record<LeadingType, LeadingKeyInfo>>> {
+async function resolveLeadingSet(nodeId: string): Promise<{ types: Partial<Record<LeadingType, LeadingKeyInfo>>; setKey: string }> {
   const node = await figma.getNodeByIdAsync(nodeId);
   if (!node) throw new Error('Selected node no longer exists.');
   const set = await resolveComponentSetFromNode(node);
   if (!set) {
     throw new Error('Select the leading component set itself, one of its variants, or an instance of it.');
   }
-  return readLeadingTypesFromSet(set);
+  return { types: readLeadingTypesFromSet(set), setKey: set.key };
 }
 
 async function resolveOldReference(
@@ -438,6 +439,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
   mainKey: string;
   mainName: string;
   leadingTypeKeys: Partial<Record<LeadingType, LeadingKeyInfo>>;
+  leadingSetKey: string | null;
   actionKey: LeadingKeyInfo | null;
   diagnostics: string[];
 }> {
@@ -450,6 +452,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
   clone.y = ref.instance.y;
 
   const leadingTypeKeys: Partial<Record<LeadingType, LeadingKeyInfo>> = {};
+  let leadingSetKey: string | null = null;
   let actionKey: LeadingKeyInfo | null = null;
   const diagnostics: string[] = [];
   const childNames = (n: SceneNode | null) => (n && 'children' in n ? (n as ChildrenMixin).children.map((c) => `${c.name} [${c.type}]`).join(', ') : '(none)');
@@ -489,8 +492,10 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
         );
       } else if (oldLeadingSetKey && leadingSet.key !== oldLeadingSetKey) {
         Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet)); // definitely not old — accept
+        leadingSetKey = leadingSet.key;
       } else if (leadingSet.name.toLowerCase().includes(ref.owningName.toLowerCase())) {
         Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet)); // owned-sub-component naming convention matches — accept
+        leadingSetKey = leadingSet.key;
       } else {
         diagnostics.push(
           `Cannot verify this leading automatically — its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
@@ -533,7 +538,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
     await scanForLeadingTypeExamples(ref.owningKey, leadingTypeKeys);
   }
 
-  return { mainKey: ref.owningKey, mainName: ref.owningName, leadingTypeKeys, actionKey, diagnostics };
+  return { mainKey: ref.owningKey, mainName: ref.owningName, leadingTypeKeys, leadingSetKey, actionKey, diagnostics };
 }
 
 async function scanForLeadingTypeExamples(newMainKey: string, leadingTypeKeys: Partial<Record<LeadingType, LeadingKeyInfo>>): Promise<void> {
@@ -1052,13 +1057,20 @@ async function applyMappings(
     // already on the new leading component — it can still default to the
     // OLD leading. A "type" value match (e.g. both happen to have
     // type=icon) is not proof of identity, since old and new leading sets
-    // can share the same enum values. Explicitly verify by component key
-    // and correct it if wrong — this is the one thing that must never be
-    // silently accepted.
+    // can share the same enum values.
+    //
+    // Check at the SET level first: if the leading is already on the
+    // confirmed-correct set, switching to a different sibling variant is
+    // just setProperties() below — no import needed. Only fall back to
+    // resolving the specific variant by key (which requires importing a
+    // private component, and can fail for any variant that isn't already
+    // the one a fresh instance happens to default to) when the leading is
+    // genuinely still on a different set entirely.
     const requiredLeading = res.newLeadingTypeKeys[snapshot.leading.type as LeadingType];
     if (!requiredLeading) throw new Error(`No resolved new leading component for type "${snapshot.leading.type}".`);
-    const currentKey = await getInstanceComponentKey(leadingInstance);
-    if (currentKey !== requiredLeading.key) {
+    const currentOwningSet = await getInstanceOwningKey(leadingInstance);
+    const onCorrectSet = res.newLeadingSetKey !== null && currentOwningSet?.key === res.newLeadingSetKey;
+    if (!onCorrectSet) {
       const correctComponent = await resolveComponentByKey(requiredLeading.key);
       leadingInstance.swapComponent(correctComponent.type === 'COMPONENT_SET' ? correctComponent.defaultVariant : correctComponent);
     }
@@ -1440,6 +1452,7 @@ figma.ui.onmessage = async (msg: any) => {
         newMainName: resolution?.newMainName ?? '',
         oldLeadingSetKey: r.leadingSetKey,
         newLeadingTypeKeys: resolution?.newLeadingTypeKeys ?? {},
+        newLeadingSetKey: resolution?.newLeadingSetKey ?? null,
         newActionKey: resolution?.newActionKey ?? null,
         diagnostics: r.diagnostics,
       };
@@ -1461,6 +1474,7 @@ figma.ui.onmessage = async (msg: any) => {
         // this reference confirms, but must not wipe out types already
         // confirmed by an earlier explicit "Capture as LEADING SET".
         newLeadingTypeKeys: { ...(resolution?.newLeadingTypeKeys ?? {}), ...r.leadingTypeKeys },
+        newLeadingSetKey: r.leadingSetKey ?? resolution?.newLeadingSetKey ?? null,
         newActionKey: r.actionKey,
         diagnostics: r.diagnostics,
       };
@@ -1471,14 +1485,15 @@ figma.ui.onmessage = async (msg: any) => {
     if (msg.type === 'capture-leading') {
       const nodeId: string | undefined = msg.nodeId ?? figma.currentPage.selection[0]?.id;
       if (!nodeId) throw new Error('Select the leading component set, one of its variants, or an instance of it.');
-      const leadingTypeKeys = await resolveLeadingSet(nodeId);
+      const r = await resolveLeadingSet(nodeId);
       resolution = {
         oldMainKey: resolution?.oldMainKey ?? '',
         oldMainName: resolution?.oldMainName ?? '',
         newMainKey: resolution?.newMainKey ?? '',
         newMainName: resolution?.newMainName ?? '',
         oldLeadingSetKey: resolution?.oldLeadingSetKey ?? null,
-        newLeadingTypeKeys: leadingTypeKeys,
+        newLeadingTypeKeys: r.types,
+        newLeadingSetKey: r.setKey,
         newActionKey: resolution?.newActionKey ?? null,
         diagnostics: resolution?.diagnostics ?? [],
       };

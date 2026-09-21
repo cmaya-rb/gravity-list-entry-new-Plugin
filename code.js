@@ -218,7 +218,7 @@
     if (!set) {
       throw new Error("Select the leading component set itself, one of its variants, or an instance of it.");
     }
-    return readLeadingTypesFromSet(set);
+    return { types: readLeadingTypesFromSet(set), setKey: set.key };
   }
   async function resolveOldReference(nodeId) {
     var _a;
@@ -254,6 +254,7 @@
     clone.x = ref.instance.x + ref.instance.width + 400;
     clone.y = ref.instance.y;
     const leadingTypeKeys = {};
+    let leadingSetKey = null;
     let actionKey = null;
     const diagnostics = [];
     const childNames = (n) => n && "children" in n ? n.children.map((c) => `${c.name} [${c.type}]`).join(", ") : "(none)";
@@ -278,8 +279,10 @@
           );
         } else if (oldLeadingSetKey && leadingSet.key !== oldLeadingSetKey) {
           Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet));
+          leadingSetKey = leadingSet.key;
         } else if (leadingSet.name.toLowerCase().includes(ref.owningName.toLowerCase())) {
           Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet));
+          leadingSetKey = leadingSet.key;
         } else {
           diagnostics.push(
             `Cannot verify this leading automatically \u2014 its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
@@ -313,7 +316,7 @@
     if (missing.length > 0) {
       await scanForLeadingTypeExamples(ref.owningKey, leadingTypeKeys);
     }
-    return { mainKey: ref.owningKey, mainName: ref.owningName, leadingTypeKeys, actionKey, diagnostics };
+    return { mainKey: ref.owningKey, mainName: ref.owningName, leadingTypeKeys, leadingSetKey, actionKey, diagnostics };
   }
   async function scanForLeadingTypeExamples(newMainKey, leadingTypeKeys) {
     await figma.loadAllPagesAsync();
@@ -680,8 +683,9 @@
       }
       const requiredLeading = res.newLeadingTypeKeys[snapshot.leading.type];
       if (!requiredLeading) throw new Error(`No resolved new leading component for type "${snapshot.leading.type}".`);
-      const currentKey = await getInstanceComponentKey(leadingInstance);
-      if (currentKey !== requiredLeading.key) {
+      const currentOwningSet = await getInstanceOwningKey(leadingInstance);
+      const onCorrectSet = res.newLeadingSetKey !== null && (currentOwningSet == null ? void 0 : currentOwningSet.key) === res.newLeadingSetKey;
+      if (!onCorrectSet) {
         const correctComponent = await resolveComponentByKey(requiredLeading.key);
         leadingInstance.swapComponent(correctComponent.type === "COMPONENT_SET" ? correctComponent.defaultVariant : correctComponent);
       }
@@ -950,7 +954,7 @@
     return `pages: ${(scope.pageNames || []).join(", ")}`;
   }
   figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y;
     try {
       if (msg.type === "find-components") {
         const candidates = await findComponentCandidates(msg.scope);
@@ -968,26 +972,28 @@
           newMainName: (_d = resolution == null ? void 0 : resolution.newMainName) != null ? _d : "",
           oldLeadingSetKey: r.leadingSetKey,
           newLeadingTypeKeys: (_e = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _e : {},
-          newActionKey: (_f = resolution == null ? void 0 : resolution.newActionKey) != null ? _f : null,
+          newLeadingSetKey: (_f = resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _f : null,
+          newActionKey: (_g = resolution == null ? void 0 : resolution.newActionKey) != null ? _g : null,
           diagnostics: r.diagnostics
         };
         figma.ui.postMessage({ type: "resolution-updated", resolution });
         return;
       }
       if (msg.type === "capture-new") {
-        const nodeId = (_h = msg.nodeId) != null ? _h : (_g = figma.currentPage.selection[0]) == null ? void 0 : _g.id;
+        const nodeId = (_i = msg.nodeId) != null ? _i : (_h = figma.currentPage.selection[0]) == null ? void 0 : _h.id;
         if (!nodeId) throw new Error("Select an instance of gravity-list-entry-new first (dragged from the Assets panel), or use Find components.");
-        const r = await resolveNewReference(nodeId, (_i = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _i : null);
+        const r = await resolveNewReference(nodeId, (_j = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _j : null);
         resolution = {
-          oldMainKey: (_j = resolution == null ? void 0 : resolution.oldMainKey) != null ? _j : "",
-          oldMainName: (_k = resolution == null ? void 0 : resolution.oldMainName) != null ? _k : "",
+          oldMainKey: (_k = resolution == null ? void 0 : resolution.oldMainKey) != null ? _k : "",
+          oldMainName: (_l = resolution == null ? void 0 : resolution.oldMainName) != null ? _l : "",
           newMainKey: r.mainKey,
           newMainName: r.mainName,
-          oldLeadingSetKey: (_l = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _l : null,
+          oldLeadingSetKey: (_m = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _m : null,
           // Merge rather than replace — a verified auto-resolve fills in types
           // this reference confirms, but must not wipe out types already
           // confirmed by an earlier explicit "Capture as LEADING SET".
-          newLeadingTypeKeys: __spreadValues(__spreadValues({}, (_m = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _m : {}), r.leadingTypeKeys),
+          newLeadingTypeKeys: __spreadValues(__spreadValues({}, (_n = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _n : {}), r.leadingTypeKeys),
+          newLeadingSetKey: (_p = (_o = r.leadingSetKey) != null ? _o : resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _p : null,
           newActionKey: r.actionKey,
           diagnostics: r.diagnostics
         };
@@ -995,18 +1001,19 @@
         return;
       }
       if (msg.type === "capture-leading") {
-        const nodeId = (_o = msg.nodeId) != null ? _o : (_n = figma.currentPage.selection[0]) == null ? void 0 : _n.id;
+        const nodeId = (_r = msg.nodeId) != null ? _r : (_q = figma.currentPage.selection[0]) == null ? void 0 : _q.id;
         if (!nodeId) throw new Error("Select the leading component set, one of its variants, or an instance of it.");
-        const leadingTypeKeys = await resolveLeadingSet(nodeId);
+        const r = await resolveLeadingSet(nodeId);
         resolution = {
-          oldMainKey: (_p = resolution == null ? void 0 : resolution.oldMainKey) != null ? _p : "",
-          oldMainName: (_q = resolution == null ? void 0 : resolution.oldMainName) != null ? _q : "",
-          newMainKey: (_r = resolution == null ? void 0 : resolution.newMainKey) != null ? _r : "",
-          newMainName: (_s = resolution == null ? void 0 : resolution.newMainName) != null ? _s : "",
-          oldLeadingSetKey: (_t = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _t : null,
-          newLeadingTypeKeys: leadingTypeKeys,
-          newActionKey: (_u = resolution == null ? void 0 : resolution.newActionKey) != null ? _u : null,
-          diagnostics: (_v = resolution == null ? void 0 : resolution.diagnostics) != null ? _v : []
+          oldMainKey: (_s = resolution == null ? void 0 : resolution.oldMainKey) != null ? _s : "",
+          oldMainName: (_t = resolution == null ? void 0 : resolution.oldMainName) != null ? _t : "",
+          newMainKey: (_u = resolution == null ? void 0 : resolution.newMainKey) != null ? _u : "",
+          newMainName: (_v = resolution == null ? void 0 : resolution.newMainName) != null ? _v : "",
+          oldLeadingSetKey: (_w = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _w : null,
+          newLeadingTypeKeys: r.types,
+          newLeadingSetKey: r.setKey,
+          newActionKey: (_x = resolution == null ? void 0 : resolution.newActionKey) != null ? _x : null,
+          diagnostics: (_y = resolution == null ? void 0 : resolution.diagnostics) != null ? _y : []
         };
         figma.ui.postMessage({ type: "resolution-updated", resolution });
         return;
