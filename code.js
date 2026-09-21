@@ -1,5 +1,22 @@
 "use strict";
 (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropSymbols = Object.getOwnPropertySymbols;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __propIsEnum = Object.prototype.propertyIsEnumerable;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __spreadValues = (a, b) => {
+    for (var prop in b || (b = {}))
+      if (__hasOwnProp.call(b, prop))
+        __defNormalProp(a, prop, b[prop]);
+    if (__getOwnPropSymbols)
+      for (var prop of __getOwnPropSymbols(b)) {
+        if (__propIsEnum.call(b, prop))
+          __defNormalProp(a, prop, b[prop]);
+      }
+    return a;
+  };
+
   // src/code.ts
   figma.showUI(__html__, { width: 420, height: 640 });
   var resolution = null;
@@ -62,6 +79,19 @@
     const target = name.toLowerCase();
     for (const child of node.children) {
       if (child.name.toLowerCase() === target) return child;
+    }
+    return null;
+  }
+  function findChildByStructuralName(node, name) {
+    var _a;
+    const exact = findChildByName(node, name);
+    if (exact) return exact;
+    if (!("children" in node)) return null;
+    const target = name.toLowerCase();
+    for (const child of node.children) {
+      const parts = child.name.split("/");
+      const lastPart = (_a = parts[parts.length - 1]) == null ? void 0 : _a.trim().toLowerCase();
+      if (parts.length > 1 && lastPart === target) return child;
     }
     return null;
   }
@@ -156,23 +186,8 @@
     }
     throw new Error("Selected node must be a component instance, component, or component set.");
   }
-  async function resolveLeadingSet(nodeId) {
+  function readLeadingTypesFromSet(set) {
     var _a;
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) throw new Error("Selected node no longer exists.");
-    let set = null;
-    if (node.type === "COMPONENT_SET") {
-      set = node;
-    } else if (node.type === "COMPONENT") {
-      const parent = node.parent;
-      set = parent && parent.type === "COMPONENT_SET" ? parent : null;
-    } else if (node.type === "INSTANCE") {
-      const main = await node.getMainComponentAsync();
-      set = main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
-    }
-    if (!set) {
-      throw new Error("Select the leading component set itself, one of its variants, or an instance of it.");
-    }
     const result = {};
     for (const child of set.children) {
       const vp = child.variantProperties || {};
@@ -184,25 +199,56 @@
     }
     return result;
   }
+  async function resolveComponentSetFromNode(node) {
+    if (node.type === "COMPONENT_SET") return node;
+    if (node.type === "COMPONENT") {
+      const parent = node.parent;
+      return parent && parent.type === "COMPONENT_SET" ? parent : null;
+    }
+    if (node.type === "INSTANCE") {
+      const main = await node.getMainComponentAsync();
+      return main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
+    }
+    return null;
+  }
+  async function resolveLeadingSet(nodeId) {
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) throw new Error("Selected node no longer exists.");
+    const set = await resolveComponentSetFromNode(node);
+    if (!set) {
+      throw new Error("Select the leading component set itself, one of its variants, or an instance of it.");
+    }
+    return readLeadingTypesFromSet(set);
+  }
   async function resolveOldReference(nodeId) {
     var _a;
     const ref = await toReferenceInstance(nodeId);
+    const diagnostics = [];
+    const childNames = (n) => n && "children" in n ? n.children.map((c) => `${c.name} [${c.type}]`).join(", ") : "(none)";
     try {
       let leadingSetKey = null;
-      const leadingWrap = findChildByName(ref.instance, "leading");
-      if (leadingWrap) {
+      const leadingWrap = findChildByStructuralName(ref.instance, "leading");
+      if (!leadingWrap) {
+        diagnostics.push(`OLD: no "leading" child found. Root children: ${childNames(ref.instance)}`);
+      } else {
         const leadingInstance = findDescendantInstance(leadingWrap);
-        if (leadingInstance) {
+        if (!leadingInstance) {
+          diagnostics.push(`OLD: found a "leading" child (type ${leadingWrap.type}) but it isn't/doesn't contain an instance.`);
+        } else {
           const leadingOwning = await getInstanceOwningKey(leadingInstance);
+          if (!leadingOwning) {
+            diagnostics.push("OLD: found the leading instance but could not read its main component (getMainComponentAsync returned null \u2014 possibly detached).");
+          }
           leadingSetKey = (_a = leadingOwning == null ? void 0 : leadingOwning.key) != null ? _a : null;
         }
       }
-      return { mainKey: ref.owningKey, mainName: ref.owningName, leadingSetKey };
+      return { mainKey: ref.owningKey, mainName: ref.owningName, leadingSetKey, diagnostics };
     } finally {
       ref.cleanup();
     }
   }
-  async function resolveNewReference(nodeId) {
+  async function resolveNewReference(nodeId, oldLeadingSetKey) {
+    var _a;
     const ref = await toReferenceInstance(nodeId);
     const clone = ref.instance.clone();
     clone.x = ref.instance.x + ref.instance.width + 400;
@@ -219,24 +265,25 @@
         } catch (e) {
         }
       }
-      const leadingWrap = findChildByName(clone, "leading");
+      const leadingWrap = findChildByStructuralName(clone, "leading");
       const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
       if (leadingInstance) {
-        const types = ["image", "icon", "avatar", "flag"];
-        for (const t of types) {
-          const typeProp = findProp(leadingInstance, "type");
-          try {
-            if (typeProp) {
-              leadingInstance.setProperties({ [typeProp.key]: t });
-            }
-            const confirmProp = findProp(leadingInstance, "type");
-            const resolvedType = confirmProp ? String(confirmProp.value).toLowerCase() : null;
-            if (resolvedType === t) {
-              const leadingMain = await leadingInstance.getMainComponentAsync();
-              if (leadingMain) leadingTypeKeys[t] = { key: leadingMain.key, name: leadingMain.name };
-            }
-          } catch (e) {
-          }
+        const leadingMain = await leadingInstance.getMainComponentAsync();
+        const leadingSet = ((_a = leadingMain == null ? void 0 : leadingMain.parent) == null ? void 0 : _a.type) === "COMPONENT_SET" ? leadingMain.parent : null;
+        if (!leadingSet) {
+          diagnostics.push("Could not determine the leading's component set.");
+        } else if (oldLeadingSetKey && leadingSet.key === oldLeadingSetKey) {
+          diagnostics.push(
+            `This reference's leading is still on the OLD leading component set \u2014 cannot auto-resolve from it. Use "Capture selection as LEADING SET" on a confirmed-correct leading instead.`
+          );
+        } else if (oldLeadingSetKey && leadingSet.key !== oldLeadingSetKey) {
+          Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet));
+        } else if (leadingSet.name.toLowerCase().includes(ref.owningName.toLowerCase())) {
+          Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet));
+        } else {
+          diagnostics.push(
+            `Cannot verify this leading automatically \u2014 its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
+          );
         }
       } else {
         diagnostics.push(`No "leading" child found. Root children: ${childNames(clone)}`);
@@ -282,7 +329,7 @@
       instances.map(async (inst) => {
         const owning = await getInstanceOwningKey(inst);
         if (!owning || owning.key !== newMainKey) return;
-        const leadingWrap = findChildByName(inst, "leading");
+        const leadingWrap = findChildByStructuralName(inst, "leading");
         const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
         if (!leadingInstance) return;
         const typeProp = findProp(leadingInstance, "type");
@@ -388,7 +435,7 @@
     return Array.from(groups.values());
   }
   async function readLeadingSnapshot(instance) {
-    const leadingWrap = findChildByName(instance, "leading");
+    const leadingWrap = findChildByStructuralName(instance, "leading");
     if (!leadingWrap) return null;
     const leadingInstance = findDescendantInstance(leadingWrap);
     if (!leadingInstance) return null;
@@ -626,7 +673,7 @@
     if (snapshot.heading !== null) setPropByBase(target, "heading", snapshot.heading);
     if (snapshot.description !== null) setPropByBase(target, "description", snapshot.description);
     if (snapshot.leading && snapshot.leading.type !== "unknown") {
-      const leadingWrap = findChildByName(target, "leading");
+      const leadingWrap = findChildByStructuralName(target, "leading");
       const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
       if (!leadingInstance) {
         throw new Error("New leading instance not found after main component swap.");
@@ -648,6 +695,14 @@
       const finalKey = await getInstanceComponentKey(leadingInstance);
       if (finalKey !== requiredLeading.key) {
         throw new Error("Leading is still not on the new leading component after corrective swap.");
+      }
+      if (res.oldLeadingSetKey) {
+        const finalOwning = await getInstanceOwningKey(leadingInstance);
+        if (finalOwning && finalOwning.key === res.oldLeadingSetKey) {
+          throw new Error(
+            'Leading resolved to the OLD leading set despite matching the captured key \u2014 the captured leading data is wrong. Re-run "Capture selection as LEADING SET" pointing at a confirmed-correct leading.'
+          );
+        }
       }
       if (snapshot.leading.type === "image") {
         const img = findChildByName(leadingInstance, "image");
@@ -804,7 +859,7 @@
       }
       if (!owning || owning.key !== res.newMainKey) continue;
       try {
-        const leadingWrap = findChildByName(inst, "leading");
+        const leadingWrap = findChildByStructuralName(inst, "leading");
         const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
         if (!leadingInstance) continue;
         const typeProp = findProp(leadingInstance, "type");
@@ -821,6 +876,12 @@
         }
         const currentKey = await getInstanceComponentKey(leadingInstance);
         if (currentKey === required.key) {
+          if (res.oldLeadingSetKey) {
+            const owningNow = await getInstanceOwningKey(leadingInstance);
+            if (owningNow && owningNow.key === res.oldLeadingSetKey) {
+              throw new Error('Captured leading key matches the OLD leading set \u2014 re-capture "LEADING SET" from a confirmed-correct leading.');
+            }
+          }
           alreadyCorrect++;
           continue;
         }
@@ -841,7 +902,7 @@
     const owning = await getInstanceOwningKey(replacement);
     if (!owning || owning.key !== res.newMainKey) problems.push("Destination main component key does not match the resolved new component.");
     if (snapshot.leading && snapshot.leading.type !== "unknown") {
-      const leadingWrap = findChildByName(replacement, "leading");
+      const leadingWrap = findChildByStructuralName(replacement, "leading");
       const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
       const typeProp = leadingInstance ? findProp(leadingInstance, "type") : null;
       const actualType = typeProp ? String(typeProp.value).toLowerCase() : null;
@@ -889,7 +950,7 @@
     return `pages: ${(scope.pageNames || []).join(", ")}`;
   }
   figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
     try {
       if (msg.type === "find-components") {
         const candidates = await findComponentCandidates(msg.scope);
@@ -908,22 +969,25 @@
           oldLeadingSetKey: r.leadingSetKey,
           newLeadingTypeKeys: (_e = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _e : {},
           newActionKey: (_f = resolution == null ? void 0 : resolution.newActionKey) != null ? _f : null,
-          diagnostics: (_g = resolution == null ? void 0 : resolution.diagnostics) != null ? _g : []
+          diagnostics: r.diagnostics
         };
         figma.ui.postMessage({ type: "resolution-updated", resolution });
         return;
       }
       if (msg.type === "capture-new") {
-        const nodeId = (_i = msg.nodeId) != null ? _i : (_h = figma.currentPage.selection[0]) == null ? void 0 : _h.id;
+        const nodeId = (_h = msg.nodeId) != null ? _h : (_g = figma.currentPage.selection[0]) == null ? void 0 : _g.id;
         if (!nodeId) throw new Error("Select an instance of gravity-list-entry-new first (dragged from the Assets panel), or use Find components.");
-        const r = await resolveNewReference(nodeId);
+        const r = await resolveNewReference(nodeId, (_i = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _i : null);
         resolution = {
           oldMainKey: (_j = resolution == null ? void 0 : resolution.oldMainKey) != null ? _j : "",
           oldMainName: (_k = resolution == null ? void 0 : resolution.oldMainName) != null ? _k : "",
           newMainKey: r.mainKey,
           newMainName: r.mainName,
           oldLeadingSetKey: (_l = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _l : null,
-          newLeadingTypeKeys: r.leadingTypeKeys,
+          // Merge rather than replace — a verified auto-resolve fills in types
+          // this reference confirms, but must not wipe out types already
+          // confirmed by an earlier explicit "Capture as LEADING SET".
+          newLeadingTypeKeys: __spreadValues(__spreadValues({}, (_m = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _m : {}), r.leadingTypeKeys),
           newActionKey: r.actionKey,
           diagnostics: r.diagnostics
         };
@@ -931,18 +995,18 @@
         return;
       }
       if (msg.type === "capture-leading") {
-        const nodeId = (_n = msg.nodeId) != null ? _n : (_m = figma.currentPage.selection[0]) == null ? void 0 : _m.id;
+        const nodeId = (_o = msg.nodeId) != null ? _o : (_n = figma.currentPage.selection[0]) == null ? void 0 : _n.id;
         if (!nodeId) throw new Error("Select the leading component set, one of its variants, or an instance of it.");
         const leadingTypeKeys = await resolveLeadingSet(nodeId);
         resolution = {
-          oldMainKey: (_o = resolution == null ? void 0 : resolution.oldMainKey) != null ? _o : "",
-          oldMainName: (_p = resolution == null ? void 0 : resolution.oldMainName) != null ? _p : "",
-          newMainKey: (_q = resolution == null ? void 0 : resolution.newMainKey) != null ? _q : "",
-          newMainName: (_r = resolution == null ? void 0 : resolution.newMainName) != null ? _r : "",
-          oldLeadingSetKey: (_s = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _s : null,
+          oldMainKey: (_p = resolution == null ? void 0 : resolution.oldMainKey) != null ? _p : "",
+          oldMainName: (_q = resolution == null ? void 0 : resolution.oldMainName) != null ? _q : "",
+          newMainKey: (_r = resolution == null ? void 0 : resolution.newMainKey) != null ? _r : "",
+          newMainName: (_s = resolution == null ? void 0 : resolution.newMainName) != null ? _s : "",
+          oldLeadingSetKey: (_t = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _t : null,
           newLeadingTypeKeys: leadingTypeKeys,
-          newActionKey: (_t = resolution == null ? void 0 : resolution.newActionKey) != null ? _t : null,
-          diagnostics: (_u = resolution == null ? void 0 : resolution.diagnostics) != null ? _u : []
+          newActionKey: (_u = resolution == null ? void 0 : resolution.newActionKey) != null ? _u : null,
+          diagnostics: (_v = resolution == null ? void 0 : resolution.diagnostics) != null ? _v : []
         };
         figma.ui.postMessage({ type: "resolution-updated", resolution });
         return;

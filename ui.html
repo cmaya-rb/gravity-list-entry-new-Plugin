@@ -42,7 +42,7 @@
     <button id="capture-old">Capture selection as OLD</button>
     <button id="capture-new">Capture selection as NEW</button>
   </div>
-  <p class="hint" style="margin-top:10px;">Leading types are read directly off the leading component set — not inferred from a list-entry's current leading, which can be wrong even when its "type" value looks right. Select the leading set (or one of its variants, or an instance of it) and capture it explicitly:</p>
+  <p class="hint" style="margin-top:10px;">"Capture selection as NEW" alone auto-resolves leading types, verified (not blindly trusted) — it won't accept a leading still on the old component. Use this button only if leading still shows unresolved above (meaning your reference's leading needs fixing first), or to point at a leading set explicitly:</p>
   <button id="capture-leading">Capture selection as LEADING SET</button>
   <div id="resolution-summary"></div>
 </section>
@@ -71,8 +71,8 @@
 </section>
 
 <section>
-  <h3>4. Fix leading on already-migrated instances</h3>
-  <p class="hint">Run after migration (uses the scope above) to correct any leading still pointing at the old component — safe to re-run, it skips anything already correct.</p>
+  <h3>4. Fix leading (recovery only)</h3>
+  <p class="hint">Not needed for new migrations — step 2's "Migrate" already corrects the leading inline for every instance it processes. Only use this to clean up instances migrated before that fix existed (stuck on the old leading and now skipped by idempotency). Safe to re-run, skips anything already correct.</p>
   <button id="run-fix-leading">Fix leading</button>
   <pre id="fix-leading-report">No run yet.</pre>
 </section>
@@ -104,6 +104,7 @@
     const diagnostics = (resolution.diagnostics || []).map(d => `<div class="kv" style="color:#cf222e;">⚠ ${d}</div>`).join('');
     el.innerHTML = `
       <div class="kv">Old main: ${resolution.oldMainName || '—'} <span class="badge ${resolution.oldMainKey ? 'badge-yes' : 'badge-no'}">${resolution.oldMainKey ? 'set' : 'missing'}</span></div>
+      <div class="kv">Old leading: <span class="badge ${resolution.oldLeadingSetKey ? 'badge-yes' : 'badge-no'}">${resolution.oldLeadingSetKey ? 'found' : 'NOT FOUND'}</span></div>
       <div class="kv">New main: ${resolution.newMainName || '—'} <span class="badge ${resolution.newMainKey ? 'badge-yes' : 'badge-no'}">${resolution.newMainKey ? 'set' : 'missing'}</span></div>
       ${leadingRows}
       <div class="kv">Action component: <span class="badge ${resolution.newActionKey ? 'badge-yes' : 'badge-no'}">${resolution.newActionKey ? 'resolved' : 'unresolved'}</span></div>
