@@ -1,0 +1,14 @@
+{
+  "name": "gravity-list-entry-migration-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/code.ts --bundle --outfile=code.js --target=es2017 --format=iife",
+    "watch": "esbuild src/code.ts --bundle --outfile=code.js --target=es2017 --format=iife --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.94.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}

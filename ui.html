@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { font-family: -apple-system, "Inter", sans-serif; font-size: 12px; color: #1a1a1a; }
+  body { margin: 0; padding: 12px; }
+  h2 { font-size: 13px; margin: 0 0 4px; }
+  h3 { font-size: 12px; margin: 16px 0 6px; }
+  p.hint { color: #666; margin: 4px 0 8px; line-height: 1.4; }
+  section { border: 1px solid #e5e5e5; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+  button { background: #18a0fb; color: white; border: none; border-radius: 4px; padding: 6px 10px; font-size: 12px; cursor: pointer; margin-right: 6px; margin-bottom: 6px; }
+  button.secondary { background: #f0f0f0; color: #1a1a1a; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  select, input[type="number"], input[type="text"] { width: 100%; padding: 4px; margin-bottom: 6px; box-sizing: border-box; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .status-ok { color: #1a7f37; }
+  .status-bad { color: #cf222e; }
+  pre { background: #f6f8fa; padding: 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; font-size: 11px; }
+  .kv { font-size: 11px; color: #444; margin: 2px 0; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; margin-left: 4px; }
+  .badge-yes { background: #dafbe1; color: #1a7f37; }
+  .badge-no { background: #ffebe9; color: #cf222e; }
+</style>
+</head>
+<body>
+
+<section>
+  <h2>1. Resolve components</h2>
+  <p class="hint">Find candidate gravity-list-entry instances, or select one manually in Figma, then capture it as the OLD or NEW reference. Keys are always read live via the Plugin API — never guessed from names.</p>
+
+  <select id="find-scope">
+    <option value="selection">Current selection</option>
+    <option value="current-page" selected>Current page</option>
+    <option value="all-pages">Whole file</option>
+  </select>
+  <button id="find-components" class="secondary">Find components</button>
+  <div id="find-results"></div>
+
+  <h3 style="margin-top:14px;">Or capture the current selection</h3>
+  <div class="row">
+    <button id="capture-old">Capture selection as OLD</button>
+    <button id="capture-new">Capture selection as NEW</button>
+  </div>
+  <p class="hint" style="margin-top:10px;">Leading types are read directly off the leading component set — not inferred from a list-entry's current leading, which can be wrong even when its "type" value looks right. Select the leading set (or one of its variants, or an instance of it) and capture it explicitly:</p>
+  <button id="capture-leading">Capture selection as LEADING SET</button>
+  <div id="resolution-summary"></div>
+</section>
+
+<section>
+  <h3>2. Scope &amp; batch</h3>
+  <select id="scope-mode">
+    <option value="selection">Current selection</option>
+    <option value="current-page" selected>Current page</option>
+    <option value="all-pages">All pages</option>
+    <option value="named-pages">Named pages</option>
+  </select>
+  <input id="page-names" type="text" placeholder="Page names, comma separated" style="display:none" />
+  <label class="kv">Approved max batch size</label>
+  <input id="max-batch" type="number" value="50" min="1" />
+  <div class="row">
+    <button id="run-audit" class="secondary">Dry-run audit</button>
+    <button id="run-migrate">Migrate</button>
+  </div>
+</section>
+
+<section>
+  <h3>3. Result</h3>
+  <div id="progress" class="kv"></div>
+  <pre id="report">No run yet.</pre>
+</section>
+
+<section>
+  <h3>4. Fix leading on already-migrated instances</h3>
+  <p class="hint">Run after migration (uses the scope above) to correct any leading still pointing at the old component — safe to re-run, it skips anything already correct.</p>
+  <button id="run-fix-leading">Fix leading</button>
+  <pre id="fix-leading-report">No run yet.</pre>
+</section>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let resolution = null;
+  let lastAction = null;
+
+  $('scope-mode').addEventListener('change', () => {
+    $('page-names').style.display = $('scope-mode').value === 'named-pages' ? 'block' : 'none';
+  });
+
+  function getScope() {
+    const mode = $('scope-mode').value;
+    const scope = { mode };
+    if (mode === 'named-pages') scope.pageNames = $('page-names').value.split(',').map(s => s.trim()).filter(Boolean);
+    return scope;
+  }
+
+  function renderResolution() {
+    const el = $('resolution-summary');
+    if (!resolution) { el.innerHTML = '<p class="hint">Nothing resolved yet.</p>'; return; }
+    const leadingTypes = ['image', 'icon', 'avatar', 'flag'];
+    const leadingRows = leadingTypes.map(t => {
+      const found = resolution.newLeadingTypeKeys && resolution.newLeadingTypeKeys[t];
+      return `<div class="kv">Leading "${t}": <span class="badge ${found ? 'badge-yes' : 'badge-no'}">${found ? 'resolved' : 'unresolved'}</span></div>`;
+    }).join('');
+    const diagnostics = (resolution.diagnostics || []).map(d => `<div class="kv" style="color:#cf222e;">⚠ ${d}</div>`).join('');
+    el.innerHTML = `
+      <div class="kv">Old main: ${resolution.oldMainName || '—'} <span class="badge ${resolution.oldMainKey ? 'badge-yes' : 'badge-no'}">${resolution.oldMainKey ? 'set' : 'missing'}</span></div>
+      <div class="kv">New main: ${resolution.newMainName || '—'} <span class="badge ${resolution.newMainKey ? 'badge-yes' : 'badge-no'}">${resolution.newMainKey ? 'set' : 'missing'}</span></div>
+      ${leadingRows}
+      <div class="kv">Action component: <span class="badge ${resolution.newActionKey ? 'badge-yes' : 'badge-no'}">${resolution.newActionKey ? 'resolved' : 'unresolved'}</span></div>
+      ${diagnostics}
+    `;
+  }
+
+  function renderFindResults(candidates) {
+    const el = $('find-results');
+    if (!candidates || candidates.length === 0) {
+      el.innerHTML = '<p class="hint">No matching instances found in this scope.</p>';
+      return;
+    }
+    el.innerHTML = candidates.map((c, i) => `
+      <div class="kv" style="margin-top:8px;">
+        <strong>${c.name}</strong> — ${c.count} instance${c.count === 1 ? '' : 's'} ${c.pageName ? `(page "${c.pageName}")` : ''}
+        <div class="row" style="margin-top:4px;">
+          <button class="secondary" data-idx="${i}" data-role="old">Use as OLD</button>
+          <button class="secondary" data-idx="${i}" data-role="new">Use as NEW</button>
+        </div>
+      </div>
+    `).join('');
+    el.querySelectorAll('button[data-role]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const c = candidates[Number(btn.getAttribute('data-idx'))];
+        const type = btn.getAttribute('data-role') === 'old' ? 'capture-old' : 'capture-new';
+        parent.postMessage({ pluginMessage: { type, nodeId: c.exampleNodeId } }, '*');
+      });
+    });
+  }
+
+  $('find-components').onclick = () => {
+    $('find-results').innerHTML = '<p class="hint">Searching…</p>';
+    const mode = $('find-scope').value;
+    parent.postMessage({ pluginMessage: { type: 'find-components', scope: { mode } } }, '*');
+  };
+
+  $('capture-old').onclick = () => parent.postMessage({ pluginMessage: { type: 'capture-old' } }, '*');
+  $('capture-new').onclick = () => parent.postMessage({ pluginMessage: { type: 'capture-new' } }, '*');
+  $('capture-leading').onclick = () => parent.postMessage({ pluginMessage: { type: 'capture-leading' } }, '*');
+
+  $('run-audit').onclick = () => {
+    lastAction = 'audit';
+    $('report').textContent = 'Running dry-run audit…';
+    parent.postMessage({ pluginMessage: { type: 'audit', scope: getScope(), maxBatch: Number($('max-batch').value) } }, '*');
+  };
+  $('run-migrate').onclick = () => {
+    if (!confirm('This will modify the file: replace matched gravity-list-entry instances with gravity-list-entry-new. Continue?')) return;
+    lastAction = 'migrate';
+    $('report').textContent = 'Migrating…';
+    $('progress').textContent = '';
+    parent.postMessage({ pluginMessage: { type: 'migrate', scope: getScope(), maxBatch: Number($('max-batch').value) } }, '*');
+  };
+
+  $('run-fix-leading').onclick = () => {
+    lastAction = 'fix-leading';
+    $('fix-leading-report').textContent = 'Fixing…';
+    parent.postMessage({ pluginMessage: { type: 'fix-leading', scope: getScope() } }, '*');
+  };
+
+  window.onmessage = (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg) return;
+    if (msg.type === 'resolution-updated') {
+      resolution = msg.resolution;
+      renderResolution();
+    } else if (msg.type === 'find-results') {
+      renderFindResults(msg.candidates);
+    } else if (msg.type === 'audit-result') {
+      $('report').textContent = `Migratable: ${msg.migratable}\nAlready migrated: ${msg.alreadyMigrated}\n${msg.detachedNote}`;
+    } else if (msg.type === 'progress') {
+      $('progress').textContent = `Processing ${msg.done} / ${msg.total}…`;
+    } else if (msg.type === 'report') {
+      $('progress').textContent = 'Done.';
+      $('report').textContent = msg.report;
+    } else if (msg.type === 'fix-leading-result') {
+      const r = msg.result;
+      $('fix-leading-report').textContent =
+        `Fixed: ${r.fixed}\nAlready correct: ${r.alreadyCorrect}\nSkipped: ${r.skipped}\nFailed: ${r.failed}\n\n` +
+        (r.exceptions.length ? r.exceptions.join('\n') : 'No exceptions.');
+    } else if (msg.type === 'error') {
+      const target = lastAction === 'fix-leading' ? 'fix-leading-report' : 'report';
+      $(target).textContent = 'Error: ' + msg.message;
+    }
+  };
+
+  renderResolution();
+</script>
+</body>
+</html>
