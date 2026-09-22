@@ -4,6 +4,11 @@ body {
   background: var(--gravity-color-surface-light-lighter);
   font-family: var(--gravity-font-family-text);
   -webkit-font-smoothing: antialiased;
+  /* Node IDs and other dynamic strings can be one long unbroken run (e.g.
+     "37:23495;6901:3138;6246:57884") with no natural break point — without
+     this, they overflow their container instead of wrapping. Inherited, so
+     it reaches every gravity-text's shadow-rendered span too. */
+  overflow-wrap: anywhere;
 }
 .app {
   display: flex;
@@ -53,9 +58,19 @@ body {
   justify-content: space-between;
   gap: var(--gravity-spacing-tight);
   min-height: 48px;
-  padding: 0 var(--gravity-spacing-normal);
+  padding: var(--gravity-spacing-x-tight) var(--gravity-spacing-normal);
   background: var(--gravity-color-surface-light-lighter);
   border: var(--gravity-border-thin) solid var(--gravity-color-glass-dark-10);
   border-radius: var(--gravity-radius-medium);
   box-sizing: border-box;
+}
+/* Flex items default to min-width: auto (their unwrapped content width), so
+   without this a long name/label refuses to shrink and pushes the badge on
+   the right out of the row instead of wrapping onto a second line. */
+.row-card > *:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.row-card > *:last-child {
+  flex-shrink: 0;
 }
