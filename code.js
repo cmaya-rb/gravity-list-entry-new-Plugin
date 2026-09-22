@@ -18,7 +18,7 @@
   };
 
   // src/code.ts
-  figma.showUI(__html__, { width: 420, height: 640 });
+  figma.showUI(__html__, { width: 400, height: 720 });
   var resolution = null;
   var componentIndex = null;
   var instanceIndexBuilt = false;
@@ -135,7 +135,10 @@
     return null;
   }
   function findMetaContainer(node) {
-    return findChildByName(node, "meta-container") || findChildByPath(node, ["content-container", "meta-container"]);
+    const direct = findChildByStructuralName(node, "meta-container");
+    if (direct) return direct;
+    const contentContainer = findChildByName(node, "content-container");
+    return contentContainer ? findChildByStructuralName(contentContainer, "meta-container") : null;
   }
   async function getOwningKey(component) {
     if (component.parent && component.parent.type === "COMPONENT_SET") {
@@ -199,26 +202,11 @@
     }
     return result;
   }
-  async function resolveComponentSetFromNode(node) {
-    if (node.type === "COMPONENT_SET") return node;
-    if (node.type === "COMPONENT") {
-      const parent = node.parent;
-      return parent && parent.type === "COMPONENT_SET" ? parent : null;
-    }
-    if (node.type === "INSTANCE") {
-      const main = await node.getMainComponentAsync();
-      return main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
-    }
+  function detectReferenceRoleFromName(name) {
+    const n = name.trim().toLowerCase();
+    if (n === "gravity-list-entry-new") return "new";
+    if (n === "gravity-list-entry") return "old";
     return null;
-  }
-  async function resolveLeadingSet(nodeId) {
-    const node = await figma.getNodeByIdAsync(nodeId);
-    if (!node) throw new Error("Selected node no longer exists.");
-    const set = await resolveComponentSetFromNode(node);
-    if (!set) {
-      throw new Error("Select the leading component set itself, one of its variants, or an instance of it.");
-    }
-    return { types: readLeadingTypesFromSet(set), setKey: set.key };
   }
   async function resolveOldReference(nodeId) {
     var _a;
@@ -432,7 +420,14 @@
         existing.count += 1;
       } else {
         const page = findPageOf(node);
-        groups.set(owning.key, { key: owning.key, name: owning.name, count: 1, exampleNodeId: node.id, pageName: (_a = page == null ? void 0 : page.name) != null ? _a : "" });
+        groups.set(owning.key, {
+          key: owning.key,
+          name: owning.name,
+          count: 1,
+          exampleNodeId: node.id,
+          pageName: (_a = page == null ? void 0 : page.name) != null ? _a : "",
+          role: detectReferenceRoleFromName(owning.name)
+        });
       }
     }
     return Array.from(groups.values());
@@ -491,12 +486,27 @@
       iconPosition: iconPositionProp ? String(iconPositionProp.value) : void 0
     };
   }
+  function childNameList(node) {
+    if (!("children" in node)) return "(no children)";
+    const names = node.children.map((c) => `${c.name} [${c.type}]`);
+    return names.length > 0 ? names.join(", ") : "(empty)";
+  }
   async function readMetaInfo(instance) {
     const metaContainer = findMetaContainer(instance);
-    if (!metaContainer || !("children" in metaContainer)) return { metaSlotInstance: null };
-    const metaSlot = findChildByName(metaContainer, "meta-slot") || findChildByName(metaContainer, "meta");
-    if (!metaSlot || metaSlot.type !== "INSTANCE") return { metaSlotInstance: null };
-    return { metaSlotInstance: metaSlot };
+    if (!metaContainer || !("children" in metaContainer)) {
+      return {
+        metaSlotInstance: null,
+        metaDiagnostic: `no meta-container found \u2014 top-level children: ${childNameList(instance)}`
+      };
+    }
+    const metaSlot = findDescendantInstance(metaContainer);
+    if (!metaSlot) {
+      return {
+        metaSlotInstance: null,
+        metaDiagnostic: `meta-container "${metaContainer.name}" found, but no instance inside it at all \u2014 its children: ${childNameList(metaContainer)}`
+      };
+    }
+    return { metaSlotInstance: metaSlot, metaDiagnostic: null };
   }
   async function auditInstance(instance) {
     var _a, _b, _c;
@@ -559,7 +569,8 @@
       },
       leading,
       action,
-      metaSlotInstance: meta.metaSlotInstance
+      metaSlotInstance: meta.metaSlotInstance,
+      metaDiagnostic: meta.metaDiagnostic
     };
   }
   function findPageOf(node) {
@@ -608,6 +619,128 @@
     }
     return false;
   }
+  var STYLE_KEYS = [
+    "fontName",
+    "fontSize",
+    "textCase",
+    "textDecoration",
+    "letterSpacing",
+    "lineHeight",
+    "textAlignHorizontal",
+    "textAlignVertical",
+    "textAutoResize",
+    "paragraphSpacing",
+    "paragraphIndent",
+    "opacity",
+    "blendMode",
+    "effects",
+    "strokeWeight",
+    "strokeAlign",
+    "strokeCap",
+    "strokeJoin",
+    "dashPattern",
+    "cornerRadius",
+    "topLeftRadius",
+    "topRightRadius",
+    "bottomLeftRadius",
+    "bottomRightRadius",
+    "cornerSmoothing",
+    "rotation",
+    "layoutAlign",
+    "layoutGrow",
+    "layoutPositioning",
+    "clipsContent",
+    "constraints",
+    "isMask"
+  ];
+  function paintsSnapshot(node, kind) {
+    if (!(kind in node)) return void 0;
+    const value = node[kind];
+    if (value === figma.mixed || !Array.isArray(value)) return void 0;
+    return value.map((p) => JSON.parse(JSON.stringify(p)));
+  }
+  function styleIdSnapshot(node, key) {
+    if (!(key in node)) return void 0;
+    const v = node[key];
+    return typeof v === "string" ? v : void 0;
+  }
+  function readNodeStyle(node, path) {
+    const raw = node;
+    const scalars = {};
+    for (const key of STYLE_KEYS) {
+      if (!(key in node)) continue;
+      const v = raw[key];
+      if (v === figma.mixed || v === void 0) continue;
+      scalars[key] = JSON.parse(JSON.stringify(v));
+    }
+    return {
+      path,
+      name: node.name,
+      fills: paintsSnapshot(node, "fills"),
+      strokes: paintsSnapshot(node, "strokes"),
+      fillStyleId: styleIdSnapshot(node, "fillStyleId"),
+      strokeStyleId: styleIdSnapshot(node, "strokeStyleId"),
+      effectStyleId: styleIdSnapshot(node, "effectStyleId"),
+      textStyleId: styleIdSnapshot(node, "textStyleId"),
+      reactions: "reactions" in node && raw.reactions !== void 0 ? JSON.parse(JSON.stringify(raw.reactions)) : void 0,
+      scalars
+    };
+  }
+  async function setViaAsyncOrAssign(node, asyncName, propName, value) {
+    const raw = node;
+    const fn = raw[asyncName];
+    if (typeof fn === "function") {
+      await fn.call(node, value);
+    } else {
+      raw[propName] = value;
+    }
+  }
+  async function applyNodeStyle(targetNode, o, warnings) {
+    const label = `meta node [${o.path.join(",")}] "${o.name}"`;
+    const raw = targetNode;
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const step = async (what, fn) => {
+      try {
+        await fn();
+      } catch (err) {
+        warnings.push(`${label} ${what}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    if (targetNode.name !== o.name) await step("name", () => void (targetNode.name = o.name));
+    if (targetNode.type === "TEXT") {
+      const t = targetNode;
+      await step("font load", async () => {
+        if (t.fontName !== figma.mixed) await figma.loadFontAsync(t.fontName);
+        if (o.scalars.fontName) await figma.loadFontAsync(o.scalars.fontName);
+      });
+    }
+    for (const key of STYLE_KEYS) {
+      if (!(key in o.scalars) || !(key in targetNode)) continue;
+      if (same(raw[key], o.scalars[key])) continue;
+      await step(key, () => void (raw[key] = o.scalars[key]));
+    }
+    if (o.fillStyleId !== void 0 && "fillStyleId" in targetNode && raw.fillStyleId !== o.fillStyleId) {
+      await step("fillStyleId", () => setViaAsyncOrAssign(targetNode, "setFillStyleIdAsync", "fillStyleId", o.fillStyleId));
+    }
+    if (!o.fillStyleId && o.fills && "fills" in targetNode && !same(paintsSnapshot(targetNode, "fills"), o.fills)) {
+      await step("fills", () => void (targetNode.fills = o.fills));
+    }
+    if (o.strokeStyleId !== void 0 && "strokeStyleId" in targetNode && raw.strokeStyleId !== o.strokeStyleId) {
+      await step("strokeStyleId", () => setViaAsyncOrAssign(targetNode, "setStrokeStyleIdAsync", "strokeStyleId", o.strokeStyleId));
+    }
+    if (!o.strokeStyleId && o.strokes && "strokes" in targetNode && !same(paintsSnapshot(targetNode, "strokes"), o.strokes)) {
+      await step("strokes", () => void (targetNode.strokes = o.strokes));
+    }
+    if (o.effectStyleId !== void 0 && "effectStyleId" in targetNode && raw.effectStyleId !== o.effectStyleId) {
+      await step("effectStyleId", () => setViaAsyncOrAssign(targetNode, "setEffectStyleIdAsync", "effectStyleId", o.effectStyleId));
+    }
+    if (o.textStyleId !== void 0 && targetNode.type === "TEXT" && raw.textStyleId !== o.textStyleId) {
+      await step("textStyleId", () => setViaAsyncOrAssign(targetNode, "setTextStyleIdAsync", "textStyleId", o.textStyleId));
+    }
+    if (o.reactions !== void 0 && "reactions" in targetNode && !same(raw.reactions, o.reactions)) {
+      await step("reactions", () => setViaAsyncOrAssign(targetNode, "setReactionsAsync", "reactions", o.reactions));
+    }
+  }
   function findChildByIndexPath(node, path) {
     let current = node;
     for (const idx of path) {
@@ -621,9 +754,23 @@
   async function captureOverrides(source) {
     const main = await source.getMainComponentAsync();
     if (!main) return null;
-    const props = {};
-    const srcProps = source.componentProperties || {};
-    for (const key of Object.keys(srcProps)) props[key] = srcProps[key].value;
+    const readProps = (inst) => {
+      const out = {};
+      const p = inst.componentProperties || {};
+      for (const key of Object.keys(p)) out[key] = p[key].value;
+      return out;
+    };
+    const props = readProps(source);
+    function collectInstanceProps(node, path, out) {
+      if (path.length > 0 && node.type === "INSTANCE") {
+        out.push({ path: [...path], props: readProps(node) });
+      }
+      if ("children" in node) {
+        node.children.forEach((child, idx) => collectInstanceProps(child, [...path, idx], out));
+      }
+    }
+    const instanceProps = [];
+    collectInstanceProps(source, [], instanceProps);
     function collectText(node, path, out) {
       if (node.type === "TEXT") out.push({ path: [...path], characters: node.characters });
       if ("children" in node) {
@@ -632,15 +779,45 @@
     }
     const texts = [];
     collectText(source, [], texts);
-    return { main, props, texts };
+    function collectVisibility(node, path, out) {
+      out.push({ path: [...path], visible: node.visible });
+      if ("children" in node) {
+        node.children.forEach((child, idx) => collectVisibility(child, [...path, idx], out));
+      }
+    }
+    const visibility = [];
+    source.children.forEach((child, idx) => collectVisibility(child, [idx], visibility));
+    function collectStyles(node, path, out) {
+      out.push(readNodeStyle(node, path));
+      if ("children" in node) {
+        node.children.forEach((child, idx) => collectStyles(child, [...path, idx], out));
+      }
+    }
+    const styles = [];
+    collectStyles(source, [], styles);
+    return { main, props, instanceProps, texts, visibility, styles };
   }
   async function applyOverrideCapture(target, captured) {
+    const warnings = [];
     target.swapComponent(captured.main);
-    for (const key of Object.keys(captured.props)) {
-      try {
-        target.setProperties({ [key]: captured.props[key] });
-      } catch (e) {
+    const applyProps = (inst, props, label) => {
+      for (const key of Object.keys(props)) {
+        try {
+          inst.setProperties({ [key]: props[key] });
+        } catch (err) {
+          warnings.push(`${label} "${key}" \u2192 ${String(props[key])}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
+    };
+    applyProps(target, captured.props, "meta root prop");
+    const nested = [...captured.instanceProps].sort((a, b) => a.path.length - b.path.length);
+    for (const { path, props } of nested) {
+      const targetNode = findChildByIndexPath(target, path);
+      if (!targetNode || targetNode.type !== "INSTANCE") {
+        warnings.push(`meta nested instance at [${path.join(",")}] not found post-swap \u2014 its ${Object.keys(props).length} prop(s) dropped`);
+        continue;
+      }
+      applyProps(targetNode, props, `meta nested [${path.join(",")}] prop`);
     }
     for (const { path, characters } of captured.texts) {
       const targetNode = findChildByIndexPath(target, path);
@@ -652,9 +829,36 @@
       } catch (e) {
       }
     }
+    for (const { path, visible } of captured.visibility) {
+      const targetNode = findChildByIndexPath(target, path);
+      if (targetNode) targetNode.visible = visible;
+    }
+    for (const o of captured.styles) {
+      const targetNode = findChildByIndexPath(target, o.path);
+      if (!targetNode) {
+        warnings.push(`meta node [${o.path.join(",")}] "${o.name}" missing post-swap \u2014 its style overrides dropped`);
+        continue;
+      }
+      await applyNodeStyle(targetNode, o, warnings);
+    }
+    const verify = (inst, expected, label) => {
+      const actual = inst.componentProperties || {};
+      for (const key of Object.keys(expected)) {
+        if (!(key in actual)) continue;
+        if (String(actual[key].value) !== String(expected[key])) {
+          warnings.push(`${label} "${key}" expected ${String(expected[key])}, is ${String(actual[key].value)}`);
+        }
+      }
+    };
+    verify(target, captured.props, "meta root prop");
+    for (const { path, props } of nested) {
+      const node = findChildByIndexPath(target, path);
+      if (node && node.type === "INSTANCE") verify(node, props, `meta nested [${path.join(",")}] prop`);
+    }
+    return warnings;
   }
   async function applyMappings(target, snapshot, res, preCapturedMeta) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     if (snapshot.variant.width) setPropByBase(target, "size", (_a = WIDTH_TO_SIZE[snapshot.variant.width]) != null ? _a : snapshot.variant.width);
     if (snapshot.variant.type) setPropByBase(target, "type", (_b = TYPE_MAP[snapshot.variant.type]) != null ? _b : snapshot.variant.type);
     setPropByBase(target, "presentational", snapshot.variant.presentational);
@@ -741,16 +945,24 @@
         if (snapshot.action.iconPosition !== void 0) setPropByBase(firstAction, "~ icon-position", snapshot.action.iconPosition);
       }
     }
+    if (snapshot.bool.meta === true && !snapshot.metaSlotInstance && !preCapturedMeta) {
+      throw new Error(
+        `Instance has meta enabled but its meta slot content could not be read \u2014 refusing to migrate and silently reset it. ${(_d = snapshot.metaDiagnostic) != null ? _d : ""}`
+      );
+    }
     if (snapshot.metaSlotInstance || preCapturedMeta) {
       const newMetaContainer = findMetaContainer(target);
-      const newMetaSlot = newMetaContainer ? findChildByName(newMetaContainer, "meta-slot") || findChildByName(newMetaContainer, "meta") : null;
-      if (!newMetaSlot || newMetaSlot.type !== "INSTANCE") {
-        throw new Error("Could not preserve meta content \u2014 meta slot instance not found on the new instance.");
+      const newMetaSlot = newMetaContainer ? findDescendantInstance(newMetaContainer) : null;
+      if (!newMetaSlot) {
+        throw new Error(
+          `Could not preserve meta content \u2014 no instance found inside the new instance's meta-container. ${newMetaContainer ? `Its children: ${childNameList(newMetaContainer)}` : "meta-container itself not found."}`
+        );
       }
       const captured = preCapturedMeta != null ? preCapturedMeta : await captureOverrides(snapshot.metaSlotInstance);
       if (!captured) throw new Error("Could not read the meta slot's current component.");
-      await applyOverrideCapture(newMetaSlot, captured);
+      return applyOverrideCapture(newMetaSlot, captured);
     }
+    return [];
   }
   async function migrateInstance(snapshot, res) {
     if (snapshot.leading && snapshot.leading.type !== "unknown" && !res.newLeadingTypeKeys[snapshot.leading.type]) {
@@ -788,14 +1000,14 @@
       const preCapturedMeta = snapshot.metaSlotInstance ? await captureOverrides(snapshot.metaSlotInstance) : null;
       try {
         sourceInstance.swapComponent(newMainAsComponent);
-        await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
+        const warnings = await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
         const problems = await validateReplacement(sourceInstance, snapshot, res);
         if (problems.length > 0) throw new Error(problems.join("; "));
         return {
           sourceNodeId: snapshot.nodeId,
           replacementNodeId: sourceInstance.id,
-          status: "migrated",
-          reason: "Validated and swapped in place (nested inside another instance \u2014 cannot be replaced as a separate node)."
+          status: warnings.length > 0 ? "manual-review" : "migrated",
+          reason: warnings.length > 0 ? `Swapped in place, but meta overrides did not fully stick: ${warnings.join(" | ")}` : "Validated and swapped in place (nested inside another instance \u2014 cannot be replaced as a separate node)."
         };
       } catch (err) {
         if (oldMain) {
@@ -814,6 +1026,7 @@
     if (!("children" in parent)) {
       return { sourceNodeId: snapshot.nodeId, status: "failed", reason: "Source node has no valid parent to insert the replacement into." };
     }
+    const preCapturedMetaTopLevel = snapshot.metaSlotInstance ? await captureOverrides(snapshot.metaSlotInstance) : null;
     let replacement;
     try {
       replacement = newMainAsComponent.createInstance();
@@ -833,73 +1046,23 @@
       if (snapshot.layoutAlign && "layoutAlign" in replacement) replacement.layoutAlign = snapshot.layoutAlign;
       if (snapshot.layoutPositioning && "layoutPositioning" in replacement)
         replacement.layoutPositioning = snapshot.layoutPositioning;
-      await applyMappings(replacement, snapshot, res);
+      const warnings = await applyMappings(replacement, snapshot, res, preCapturedMetaTopLevel);
       const problems = await validateReplacement(replacement, snapshot, res);
       if (problems.length > 0) {
         replacement.remove();
         return { sourceNodeId: snapshot.nodeId, status: "failed", reason: problems.join("; ") };
       }
       sourceInstance.remove();
-      return { sourceNodeId: snapshot.nodeId, replacementNodeId: replacement.id, status: "migrated", reason: "Validated and replaced." };
+      return {
+        sourceNodeId: snapshot.nodeId,
+        replacementNodeId: replacement.id,
+        status: warnings.length > 0 ? "manual-review" : "migrated",
+        reason: warnings.length > 0 ? `Replaced, but meta overrides did not fully stick: ${warnings.join(" | ")}` : "Validated and replaced."
+      };
     } catch (err) {
       replacement.remove();
       return { sourceNodeId: snapshot.nodeId, status: "failed", reason: err instanceof Error ? err.message : String(err) };
     }
-  }
-  async function fixLeadingOnMigrated(scope, res) {
-    const roots = await getScopeRoots(scope);
-    const allInstances = await collectInstances(roots);
-    let fixed = 0;
-    let alreadyCorrect = 0;
-    let skipped = 0;
-    let failed = 0;
-    const exceptions = [];
-    for (const inst of allInstances) {
-      let owning;
-      try {
-        owning = await getInstanceOwningKey(inst);
-      } catch (e) {
-        continue;
-      }
-      if (!owning || owning.key !== res.newMainKey) continue;
-      try {
-        const leadingWrap = findChildByStructuralName(inst, "leading");
-        const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
-        if (!leadingInstance) continue;
-        const typeProp = findProp(leadingInstance, "type");
-        const t = typeProp ? String(typeProp.value).toLowerCase() : null;
-        if (!t || !["image", "icon", "avatar", "flag"].includes(t)) {
-          skipped++;
-          continue;
-        }
-        const required = res.newLeadingTypeKeys[t];
-        if (!required) {
-          skipped++;
-          exceptions.push(`${inst.id} \u2014 skipped \u2014 no captured leading key for type "${t}"`);
-          continue;
-        }
-        const currentKey = await getInstanceComponentKey(leadingInstance);
-        if (currentKey === required.key) {
-          if (res.oldLeadingSetKey) {
-            const owningNow = await getInstanceOwningKey(leadingInstance);
-            if (owningNow && owningNow.key === res.oldLeadingSetKey) {
-              throw new Error('Captured leading key matches the OLD leading set \u2014 re-capture "LEADING SET" from a confirmed-correct leading.');
-            }
-          }
-          alreadyCorrect++;
-          continue;
-        }
-        const correctComponent = await resolveComponentByKey(required.key);
-        leadingInstance.swapComponent(correctComponent.type === "COMPONENT_SET" ? correctComponent.defaultVariant : correctComponent);
-        const finalKey = await getInstanceComponentKey(leadingInstance);
-        if (finalKey !== required.key) throw new Error("Swap did not stick.");
-        fixed++;
-      } catch (err) {
-        failed++;
-        exceptions.push(`${inst.id} \u2014 failed \u2014 ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    return { fixed, alreadyCorrect, skipped, failed, exceptions };
   }
   async function validateReplacement(replacement, snapshot, res) {
     const problems = [];
@@ -953,101 +1116,74 @@
     if (scope.mode === "all-pages") return "all pages";
     return `pages: ${(scope.pageNames || []).join(", ")}`;
   }
+  async function captureReference(nodeId, role) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    if (role === "old") {
+      const r2 = await resolveOldReference(nodeId);
+      resolution = {
+        oldMainKey: r2.mainKey,
+        oldMainName: r2.mainName,
+        newMainKey: (_a = resolution == null ? void 0 : resolution.newMainKey) != null ? _a : "",
+        newMainName: (_b = resolution == null ? void 0 : resolution.newMainName) != null ? _b : "",
+        oldLeadingSetKey: r2.leadingSetKey,
+        newLeadingTypeKeys: (_c = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _c : {},
+        newLeadingSetKey: (_d = resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _d : null,
+        newActionKey: (_e = resolution == null ? void 0 : resolution.newActionKey) != null ? _e : null,
+        diagnostics: r2.diagnostics
+      };
+      return;
+    }
+    const r = await resolveNewReference(nodeId, (_f = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _f : null);
+    resolution = {
+      oldMainKey: (_g = resolution == null ? void 0 : resolution.oldMainKey) != null ? _g : "",
+      oldMainName: (_h = resolution == null ? void 0 : resolution.oldMainName) != null ? _h : "",
+      newMainKey: r.mainKey,
+      newMainName: r.mainName,
+      oldLeadingSetKey: (_i = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _i : null,
+      // Merge rather than replace — a verified auto-resolve fills in types
+      // this reference confirms, but must not wipe out types already
+      // confirmed by an earlier explicit "Capture as LEADING SET".
+      newLeadingTypeKeys: __spreadValues(__spreadValues({}, (_j = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _j : {}), r.leadingTypeKeys),
+      newLeadingSetKey: (_l = (_k = r.leadingSetKey) != null ? _k : resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _l : null,
+      newActionKey: r.actionKey,
+      diagnostics: r.diagnostics
+    };
+  }
   figma.ui.onmessage = async (msg) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y;
     try {
       if (msg.type === "find-components") {
         const candidates = await findComponentCandidates(msg.scope);
-        figma.ui.postMessage({ type: "find-results", candidates });
-        return;
-      }
-      if (msg.type === "capture-old") {
-        const nodeId = (_b = msg.nodeId) != null ? _b : (_a = figma.currentPage.selection[0]) == null ? void 0 : _a.id;
-        if (!nodeId) throw new Error("Select an instance of the old gravity-list-entry first, or use Find components.");
-        const r = await resolveOldReference(nodeId);
-        resolution = {
-          oldMainKey: r.mainKey,
-          oldMainName: r.mainName,
-          newMainKey: (_c = resolution == null ? void 0 : resolution.newMainKey) != null ? _c : "",
-          newMainName: (_d = resolution == null ? void 0 : resolution.newMainName) != null ? _d : "",
-          oldLeadingSetKey: r.leadingSetKey,
-          newLeadingTypeKeys: (_e = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _e : {},
-          newLeadingSetKey: (_f = resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _f : null,
-          newActionKey: (_g = resolution == null ? void 0 : resolution.newActionKey) != null ? _g : null,
-          diagnostics: r.diagnostics
-        };
-        figma.ui.postMessage({ type: "resolution-updated", resolution });
-        return;
-      }
-      if (msg.type === "capture-new") {
-        const nodeId = (_i = msg.nodeId) != null ? _i : (_h = figma.currentPage.selection[0]) == null ? void 0 : _h.id;
-        if (!nodeId) throw new Error("Select an instance of gravity-list-entry-new first (dragged from the Assets panel), or use Find components.");
-        const r = await resolveNewReference(nodeId, (_j = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _j : null);
-        resolution = {
-          oldMainKey: (_k = resolution == null ? void 0 : resolution.oldMainKey) != null ? _k : "",
-          oldMainName: (_l = resolution == null ? void 0 : resolution.oldMainName) != null ? _l : "",
-          newMainKey: r.mainKey,
-          newMainName: r.mainName,
-          oldLeadingSetKey: (_m = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _m : null,
-          // Merge rather than replace — a verified auto-resolve fills in types
-          // this reference confirms, but must not wipe out types already
-          // confirmed by an earlier explicit "Capture as LEADING SET".
-          newLeadingTypeKeys: __spreadValues(__spreadValues({}, (_n = resolution == null ? void 0 : resolution.newLeadingTypeKeys) != null ? _n : {}), r.leadingTypeKeys),
-          newLeadingSetKey: (_p = (_o = r.leadingSetKey) != null ? _o : resolution == null ? void 0 : resolution.newLeadingSetKey) != null ? _p : null,
-          newActionKey: r.actionKey,
-          diagnostics: r.diagnostics
-        };
-        figma.ui.postMessage({ type: "resolution-updated", resolution });
-        return;
-      }
-      if (msg.type === "capture-leading") {
-        const nodeId = (_r = msg.nodeId) != null ? _r : (_q = figma.currentPage.selection[0]) == null ? void 0 : _q.id;
-        if (!nodeId) throw new Error("Select the leading component set, one of its variants, or an instance of it.");
-        const r = await resolveLeadingSet(nodeId);
-        resolution = {
-          oldMainKey: (_s = resolution == null ? void 0 : resolution.oldMainKey) != null ? _s : "",
-          oldMainName: (_t = resolution == null ? void 0 : resolution.oldMainName) != null ? _t : "",
-          newMainKey: (_u = resolution == null ? void 0 : resolution.newMainKey) != null ? _u : "",
-          newMainName: (_v = resolution == null ? void 0 : resolution.newMainName) != null ? _v : "",
-          oldLeadingSetKey: (_w = resolution == null ? void 0 : resolution.oldLeadingSetKey) != null ? _w : null,
-          newLeadingTypeKeys: r.types,
-          newLeadingSetKey: r.setKey,
-          newActionKey: (_x = resolution == null ? void 0 : resolution.newActionKey) != null ? _x : null,
-          diagnostics: (_y = resolution == null ? void 0 : resolution.diagnostics) != null ? _y : []
-        };
-        figma.ui.postMessage({ type: "resolution-updated", resolution });
-        return;
-      }
-      if (msg.type === "fix-leading") {
-        if (!resolution || Object.keys(resolution.newLeadingTypeKeys).length === 0) {
-          figma.ui.postMessage({ type: "error", message: "Capture the leading set first (see step 1)." });
-          return;
+        const notes = [];
+        for (const role of ["old", "new"]) {
+          const matches = candidates.filter((c) => c.role === role);
+          const label = role === "old" ? "gravity-list-entry" : "gravity-list-entry-new";
+          if (matches.length === 1) {
+            try {
+              await captureReference(matches[0].exampleNodeId, role);
+            } catch (err) {
+              notes.push(`Could not resolve ${label}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else if (matches.length === 0) {
+            notes.push(`No ${label} found in the current selection.`);
+          } else {
+            notes.push(
+              `Found ${matches.length} different components named "${label}" \u2014 cannot pick automatically. Narrow your selection so only the correct one is included, then scan again.`
+            );
+          }
         }
-        componentIndex = null;
-        instanceIndexBuilt = false;
-        const scope = msg.scope;
-        const result = await fixLeadingOnMigrated(scope, resolution);
-        figma.ui.postMessage({ type: "fix-leading-result", result });
+        figma.ui.postMessage({ type: "find-results", candidates, notes, resolution });
         return;
       }
-      if (msg.type === "audit" || msg.type === "migrate") {
+      if (msg.type === "migrate") {
         if (!resolution || !resolution.oldMainKey || !resolution.newMainKey) {
           throw new Error("Resolve both the old and new reference components before running.");
         }
         componentIndex = null;
         instanceIndexBuilt = false;
         const scope = msg.scope;
-        const maxBatch = msg.maxBatch;
         const roots = await getScopeRoots(scope);
         const allInstances = await collectInstances(roots);
         const { migratable, alreadyMigrated } = await classifyInstances(allInstances, resolution);
-        if (migratable.length > maxBatch) {
-          figma.ui.postMessage({
-            type: "error",
-            message: `Discovered ${migratable.length} migratable instances, which exceeds the approved batch size of ${maxBatch}. Halted before making changes.`
-          });
-          return;
-        }
         const snapshots = [];
         for (const inst of migratable) snapshots.push(await auditInstance(inst));
         const gate = gateCheck(snapshots, resolution);
@@ -1058,15 +1194,6 @@
           figma.ui.postMessage({
             type: "error",
             message: `Pre-migration gate failed (${parts.join("; ")}). Halted before making changes \u2014 resolve these by capturing a NEW reference instance that already has these variants/action in use, then re-run.`
-          });
-          return;
-        }
-        if (msg.type === "audit") {
-          figma.ui.postMessage({
-            type: "audit-result",
-            migratable: migratable.length,
-            alreadyMigrated: alreadyMigrated.length,
-            detachedNote: "Detached instances are not automatically detected \u2014 see notes."
           });
           return;
         }
@@ -1081,7 +1208,20 @@
           figma.ui.postMessage({ type: "progress", done: i + 1, total: snapshots.length });
         }
         const report = buildReport(scopeLabel(scope), migratable.length + alreadyMigrated.length, outcomes);
-        figma.ui.postMessage({ type: "report", report });
+        const count = (...statuses) => outcomes.filter((o) => statuses.includes(o.status)).length;
+        figma.ui.postMessage({
+          type: "report",
+          report,
+          summary: {
+            scope: scopeLabel(scope),
+            source: migratable.length + alreadyMigrated.length,
+            migrated: count("migrated"),
+            skipped: count("skipped", "already-migrated"),
+            failed: count("failed"),
+            manualReview: count("manual-review")
+          },
+          exceptions: outcomes.filter((o) => o.status !== "migrated").map((o) => ({ id: o.sourceNodeId, replacementId: o.replacementNodeId, status: o.status, reason: o.reason }))
+        });
         return;
       }
       if (msg.type === "get-selection-name") {

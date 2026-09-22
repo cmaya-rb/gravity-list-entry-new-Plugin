@@ -1,12 +1,16 @@
 {
-  "name": "Gravity List Entry Migration",
+  "name": "Migration Helper",
   "id": "gravity-list-entry-migration",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
-  "editorType": ["figma"],
+  "editorType": [
+    "figma"
+  ],
   "documentAccess": "dynamic-page",
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": [
+      "none"
+    ]
   }
 }
