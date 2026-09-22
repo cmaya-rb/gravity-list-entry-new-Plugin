@@ -1748,11 +1748,15 @@ figma.ui.onmessage = async (msg: any) => {
       const gate = gateCheck(snapshots, resolution);
       if (!gate.ok) {
         const parts: string[] = [];
-        if (gate.missingLeadingTypes.length > 0) parts.push(`missing leading types: ${gate.missingLeadingTypes.join(', ')}`);
-        if (gate.actionMissing) parts.push('missing new action component');
+        if (gate.missingLeadingTypes.length > 0) {
+          parts.push(`leading type${gate.missingLeadingTypes.length === 1 ? '' : 's'} "${gate.missingLeadingTypes.join('", "')}"`);
+        }
+        if (gate.actionMissing) parts.push('the action component');
         figma.ui.postMessage({
           type: 'error',
-          message: `Pre-migration gate failed (${parts.join('; ')}). Halted before making changes — resolve these by capturing a NEW reference instance that already has these variants/action in use, then re-run.`,
+          message: `Could not resolve ${parts.join(' and ')} on gravity-list-entry-new. Halted before making any changes — make sure your selection includes an instance of gravity-list-entry-new that already uses ${
+            parts.length > 1 ? 'these' : 'it'
+          }, then scan and migrate again.`,
         });
         return;
       }

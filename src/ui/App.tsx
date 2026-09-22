@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, Loader2 } from 'lucide-react';
-import { Button } from './components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
-import { Badge } from './components/ui/badge';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './components/ui/collapsible';
-import { cn } from './lib/utils';
+import {
+  GravityAccordionItem,
+  GravityCallout,
+  GravityList,
+  GravityButton,
+  GravityPanel,
+  GravityStatusBadge,
+  GravityText,
+} from '@gravity/web-components-react';
 
 type Role = 'old' | 'new' | null;
 type LeadingType = 'image' | 'icon' | 'avatar' | 'flag';
@@ -52,45 +55,33 @@ type MigrateState =
   | { kind: 'done' }
   | { kind: 'error'; message: string };
 
-const MAX_BATCH = 100;
-const LEADING_TYPES: LeadingType[] = ['image', 'icon', 'avatar', 'flag'];
 
 const post = (msg: unknown) => parent.postMessage({ pluginMessage: msg }, '*');
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-3">
-      <span className="truncate text-sm">{label}</span>
-      {children}
-    </div>
-  );
-}
-
 function CountBadge({ count, scanned }: { count: number; scanned: boolean }) {
-  if (!scanned) return <Badge variant="secondary">—</Badge>;
+  if (!scanned) {
+    return (
+      <GravityText size="xx-small" color="dark-subtle">
+        not scanned
+      </GravityText>
+    );
+  }
   return (
-    <Badge variant={count > 0 ? 'success' : 'danger'}>
+    <GravityText size="xx-small" color="dark-subtle">
       {count} instance{count === 1 ? '' : 's'}
-    </Badge>
-  );
-}
-
-function CheckRow({ label, ok, okText, badText }: { label: string; ok: boolean; okText: string; badText: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 py-0.5">
-      <span className="text-muted-foreground">{label}</span>
-      <Badge variant={ok ? 'success' : 'danger'} className="font-mono">
-        {ok ? okText : badText}
-      </Badge>
-    </div>
+    </GravityText>
   );
 }
 
 function KV({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="flex gap-2 py-0.5">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium text-foreground">{value}</span>
+    <div className="kv-row">
+      <GravityText size="xx-small" color="dark-subtle" className="kv-label">
+        {label}
+      </GravityText>
+      <GravityText size="xx-small" weight="medium" className="kv-value">
+        {String(value)}
+      </GravityText>
     </div>
   );
 }
@@ -101,23 +92,27 @@ export function App() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
   const [resolution, setResolution] = useState<Resolution | null>(null);
-  const [resolutionOpen, setResolutionOpen] = useState(false);
   const [migrate, setMigrate] = useState<MigrateState>({ kind: 'idle' });
   const [summary, setSummary] = useState<Summary | null>(null);
   const [exceptions, setExceptions] = useState<ExceptionRow[]>([]);
+  const [copied, setCopied] = useState(false);
+  const [resultsOpen, setResultsOpen] = useState(false);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const msg = event.data?.pluginMessage;
       if (!msg) return;
       switch (msg.type) {
-        case 'find-results':
+        case 'find-results': {
           setScanning(false);
           setScanned(true);
           setCandidates(msg.candidates ?? []);
           setNotes(msg.notes ?? []);
-          if (msg.resolution) setResolution(msg.resolution);
+          if (msg.resolution) {
+            setResolution(msg.resolution);
+          }
           break;
+        }
         case 'resolution-updated':
           setResolution(msg.resolution);
           break;
@@ -147,9 +142,8 @@ export function App() {
   const oldCount = countFor('old');
   const newCount = countFor('new');
   const unrecognised = candidates.filter((c) => c.role === null);
-  // One message at a time: the sandbox sends a note per missing component,
-  // which stacks with the generic "nothing found" line when both are missing.
   const scanMessage = scanned && candidates.length === 0 ? 'No matching instances found in the current selection.' : notes[0] ?? null;
+
 
   const scan = () => {
     setScanning(true);
@@ -160,129 +154,154 @@ export function App() {
   const canMigrate = !!resolution?.oldMainKey && !!resolution?.newMainKey && migrate.kind !== 'running';
 
   const runMigrate = () => {
-    if (!window.confirm('This will modify the file: replace matched gravity-list-entry instances with gravity-list-entry-new. Continue?')) return;
     setMigrate({ kind: 'running', done: 0, total: 0 });
     setSummary(null);
     setExceptions([]);
-    post({ type: 'migrate', scope: { mode: 'selection' }, maxBatch: MAX_BATCH });
+    post({ type: 'migrate', scope: { mode: 'selection' } });
   };
 
-  const statusText =
-    migrate.kind === 'idle'
-      ? 'not started'
-      : migrate.kind === 'running'
-        ? migrate.total > 0
-          ? `${migrate.done}/${migrate.total} migrated`
-          : 'starting…'
-        : migrate.kind === 'done'
-          ? 'done'
-          : 'error';
+  const copyResults = () => {
+    const lines = [
+      `Scope: ${summary?.scope ?? '—'}`,
+      `Source instances: ${summary?.source ?? 0}`,
+      `Migrated: ${summary?.migrated ?? 0}`,
+      `Skipped: ${summary?.skipped ?? 0}`,
+      `Failed: ${summary?.failed ?? 0}`,
+      ...(summary && summary.manualReview > 0 ? [`Manual review: ${summary.manualReview}`] : []),
+      ...(exceptions.length > 0 ? ['', 'Exceptions:', ...exceptions.map((e) => `${e.id} — ${e.status} — ${e.reason}`)] : []),
+    ];
+    const text = lines.join('\n');
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    } else {
+      const el = document.createElement('textarea');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      el.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
 
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>1. Find Components</CardTitle>
-          <CardDescription>Scans the current selection and resolves the old and new references automatically from the component name.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          <Button variant="outline" className="mb-1 w-full" onClick={scan} disabled={scanning}>
-            {scanning && <Loader2 className="animate-spin" />}
-            {scanning ? 'Scanning…' : 'Scan selection'}
-          </Button>
-
-          <Row label="gravity-list-entry">
-            <CountBadge count={oldCount} scanned={scanned} />
-          </Row>
-          <Row label="gravity-list-entry-new">
-            <CountBadge count={newCount} scanned={scanned} />
-          </Row>
-          {unrecognised.map((c) => (
-            <Row key={c.key} label={c.name}>
-              <Badge variant="secondary">{c.count} · unrecognised name</Badge>
-            </Row>
-          ))}
-
-          {scanMessage && <p className="text-xs text-red-600">{scanMessage}</p>}
-
-          <Collapsible open={resolutionOpen} onOpenChange={setResolutionOpen} className="rounded-lg border">
-            <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-3 text-sm font-medium">
-              Resolution Check
-              <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', resolutionOpen && 'rotate-180')} />
-            </CollapsibleTrigger>
-            <CollapsibleContent className="border-t bg-muted/40 px-3 py-3 font-mono text-xs">
-              <CheckRow label="Old main" ok={!!resolution?.oldMainKey} okText="set" badText="missing" />
-              <CheckRow label="New main" ok={!!resolution?.newMainKey} okText="set" badText="missing" />
-              <CheckRow label="Old leading" ok={!!resolution?.oldLeadingSetKey} okText="found" badText="not found" />
-              {LEADING_TYPES.map((t) => (
-                <CheckRow key={t} label={`Leading “${t}”`} ok={!!resolution?.newLeadingTypeKeys?.[t]} okText="resolved" badText="unresolved" />
-              ))}
-              <CheckRow label="Action component" ok={!!resolution?.newActionKey} okText="resolved" badText="unresolved" />
-              {resolution?.diagnostics?.length ? (
-                <div className="mt-2 flex flex-col gap-1 border-t pt-2 font-sans">
-                  {resolution.diagnostics.map((d, i) => (
-                    <p key={i} className="text-xs text-red-600">
-                      {d}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-            </CollapsibleContent>
-          </Collapsible>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>2. Migrate</CardTitle>
-          <CardDescription>Runs against your current selection in Figma. Migrate in small batches (max {MAX_BATCH} per run).</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <Row label="Status">
-            <span className={cn('shrink-0 text-xs', migrate.kind === 'error' ? 'text-red-600' : 'text-muted-foreground')}>{statusText}</span>
-          </Row>
-          {migrate.kind === 'error' && <p className="text-xs text-red-600">{migrate.message}</p>}
-          <Button className="w-full" onClick={runMigrate} disabled={!canMigrate}>
-            {migrate.kind === 'running' && <Loader2 className="animate-spin" />}
-            Migrate
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>3. Results</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="rounded-lg border bg-muted/40 px-3 py-3 font-mono text-xs">
-            {summary ? (
-              <>
-                <KV label="Scope" value={summary.scope} />
-                <KV label="Source instances" value={summary.source} />
-                <KV label="Migrated" value={summary.migrated} />
-                <KV label="Skipped" value={summary.skipped} />
-                <KV label="Failed" value={summary.failed} />
-                {summary.manualReview > 0 && <KV label="Manual review" value={summary.manualReview} />}
-              </>
-            ) : (
-              <span className="text-muted-foreground">No run yet.</span>
-            )}
-          </div>
-          {exceptions.length > 0 && (
-            <div className="max-h-48 overflow-auto rounded-lg border px-3 py-2 text-xs">
-              {exceptions.map((e, i) => (
-                <div key={i} className="border-b py-1.5 last:border-b-0">
-                  <div className="flex items-center gap-2">
-                    <Badge variant={e.status === 'failed' ? 'danger' : 'secondary'}>{e.status}</Badge>
-                    <span className="font-mono text-muted-foreground">{e.id}</span>
-                  </div>
-                  <p className="mt-1 break-words text-muted-foreground">{e.reason}</p>
-                </div>
-              ))}
+    <>
+      <GravityCallout
+        type="info"
+        inline={false}
+        message="Migrate no more than 200 instances at once. Larger runs take much longer and are harder to review."
+      />
+      <div className="app">
+      <GravityPanel heading="1. Select and Scan">
+        <div slot="body" className="stack">
+          <GravityText size="x-small" color="dark-subtle">
+            Select the frames or instances you want to migrate, then scan to resolve the old and new components.
+          </GravityText>
+          <div className="stack-tight">
+            <div className="row-card">
+              <GravityText size="x-small" weight="medium">
+                gravity-list-entry
+              </GravityText>
+              <CountBadge count={oldCount} scanned={scanned} />
             </div>
+            <div className="row-card">
+              <GravityText size="x-small" weight="medium">
+                gravity-list-entry-new
+              </GravityText>
+              <CountBadge count={newCount} scanned={scanned} />
+            </div>
+            {scanMessage && (
+              <GravityText size="xx-small" weight="medium" color="negative">
+                {scanMessage}
+              </GravityText>
+            )}
+            {unrecognised.map((c) => (
+              <div className="row-card" key={c.key}>
+                <GravityText size="x-small" weight="medium">
+                  {c.name}
+                </GravityText>
+                <GravityText size="xx-small" color="dark-subtle">
+                  {c.count} instance{c.count === 1 ? '' : 's'}
+                </GravityText>
+              </div>
+            ))}
+          </div>
+          <GravityButton type="primary" size="small" width="full-width" busy={scanning} onButtonClicked={scan}>
+            Scan selection
+          </GravityButton>
+        </div>
+      </GravityPanel>
+
+      <GravityPanel heading="2. Migrate">
+        <div slot="controls">
+          {(canMigrate || migrate.kind !== 'idle') && (
+            <GravityStatusBadge status={migrate.kind === 'done' ? 'success' : migrate.kind === 'error' ? 'danger' : migrate.kind === 'running' ? 'processing' : 'inactive'}>
+              {migrate.kind === 'done'
+                ? 'done'
+                : migrate.kind === 'error'
+                  ? 'error'
+                  : migrate.kind === 'running'
+                    ? migrate.total > 0
+                      ? `${migrate.done}/${migrate.total} migrated`
+                      : 'starting'
+                    : 'ready for migration'}
+            </GravityStatusBadge>
           )}
-        </CardContent>
-      </Card>
-    </div>
+        </div>
+        <div slot="body" className="stack">
+          <GravityText size="x-small" color="dark-subtle">
+            Review the results above, then migrate your current selection.
+          </GravityText>
+          {migrate.kind === 'error' && <GravityCallout type="warning" showIcon iconName="warning" title="Migration failed" message={migrate.message} />}
+          {migrate.kind === 'done' && (
+            <GravityAccordionItem
+              heading="Results"
+              type="boxed"
+              size="small"
+              expanded={resultsOpen}
+              actions={[{ id: 'copy', iconName: copied ? 'check' : 'copy', iconOnly: true }]}
+              onAccordionItemExpanded={(e: CustomEvent) => {
+                const d = e.detail as { expanded?: boolean } | boolean;
+                setResultsOpen(typeof d === 'boolean' ? d : !!d?.expanded);
+              }}
+              onActionClicked={() => copyResults()}
+            >
+              <div slot="body" className="stack">
+                {summary ? (
+                  <div className="stack-xx-tight">
+                    <KV label="Scope" value={summary.scope} />
+                    <KV label="Source instances" value={summary.source} />
+                    <KV label="Migrated" value={summary.migrated} />
+                    <KV label="Skipped" value={summary.skipped} />
+                    <KV label="Failed" value={summary.failed} />
+                    {summary.manualReview > 0 && <KV label="Manual review" value={summary.manualReview} />}
+                  </div>
+                ) : null}
+                {exceptions.length > 0 && (
+                  <div className="details stack-tight">
+                    {exceptions.map((e, i) => (
+                      <div key={i} className="stack-none">
+                        <GravityText size="xx-small" weight="medium">
+                          {e.id}
+                        </GravityText>
+                        <GravityText size="xx-small" color="dark-subtle">
+                          {e.reason}
+                        </GravityText>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </GravityAccordionItem>
+          )}
+          <GravityButton type="primary" size="small" width="full-width" disabled={!canMigrate} onButtonClicked={runMigrate}>
+            Migrate
+          </GravityButton>
+        </div>
+      </GravityPanel>
+
+      </div>
+    </>
   );
 }

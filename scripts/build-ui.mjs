@@ -1,12 +1,9 @@
-// Bundles the React UI into the single self-contained ui.html Figma requires:
-// Tailwind CSS + esbuild JS + base64 Inter, no external requests (manifest
-// declares networkAccess: none).
+// Bundles the React + Gravity UI into the single self-contained ui.html Figma
+// requires. Gravity's custom-elements build is bundled statically (no lazy
+// chunks); only the Bull font faces reference the Gravity static host, which
+// the manifest allows.
 import { build } from 'esbuild';
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-
-mkdirSync('build', { recursive: true });
-execSync('npx tailwindcss -i src/ui/styles.css -o build/ui.css --minify', { stdio: 'inherit' });
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const result = await build({
   entryPoints: ['src/ui/main.tsx'],
@@ -20,14 +17,12 @@ const result = await build({
 });
 const js = result.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
 
-const fontCss = [400, 500, 600]
-  .map((w) => {
-    const b64 = readFileSync(`node_modules/@fontsource/inter/files/inter-latin-${w}-normal.woff2`).toString('base64');
-    return `@font-face{font-family:Inter;font-style:normal;font-weight:${w};font-display:swap;src:url(data:font/woff2;base64,${b64}) format('woff2')}`;
-  })
-  .join('');
+const css = [
+  readFileSync('node_modules/@gravity/foundation/primitives/index.css', 'utf8'),
+  readFileSync('node_modules/@gravity/foundation/primitives/font/default.css', 'utf8'),
+  readFileSync('src/ui/styles.css', 'utf8'),
+].join('\n');
 
-const css = fontCss + readFileSync('build/ui.css', 'utf8');
 const html = readFileSync('src/ui/index.html', 'utf8')
   .replace('/*__CSS__*/', () => css)
   .replace('/*__JS__*/', () => js);

@@ -10,7 +10,8 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": [
-      "none"
-    ]
+      "https://rbds-static.redbull.com"
+    ],
+    "reasoning": "Loads Red Bull's Gravity design system fonts (Bull) for the plugin UI."
   }
 }

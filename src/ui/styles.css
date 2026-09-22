@@ -1,38 +1,61 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-@layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --radius: 0.5rem;
-  }
-  html {
-    font-size: 14px;
-  }
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground antialiased;
-    margin: 0;
-  }
+html,
+body {
+  margin: 0;
+  background: var(--gravity-color-surface-light-lighter);
+  font-family: var(--gravity-font-family-text);
+  -webkit-font-smoothing: antialiased;
+}
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gravity-spacing-normal);
+  padding: var(--gravity-spacing-normal);
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gravity-spacing-normal);
+}
+.stack-tight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gravity-spacing-x-tight);
+}
+.stack-xx-tight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gravity-spacing-xx-tight);
+}
+.kv-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gravity-spacing-x-tight);
+}
+.kv-label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.kv-value {
+  flex: 1;
+  min-width: 0;
+}
+.details {
+  border-top: var(--gravity-border-thin) solid var(--gravity-color-glass-dark-10);
+  padding-top: var(--gravity-spacing-tight);
+}
+.stack-none {
+  display: flex;
+  flex-direction: column;
+}
+.row-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gravity-spacing-tight);
+  min-height: 48px;
+  padding: 0 var(--gravity-spacing-normal);
+  background: var(--gravity-color-surface-light-lighter);
+  border: var(--gravity-border-thin) solid var(--gravity-color-glass-dark-10);
+  border-radius: var(--gravity-radius-medium);
+  box-sizing: border-box;
 }
