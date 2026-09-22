@@ -134,11 +134,19 @@
     }
     return null;
   }
+  var META_CONTAINER_NAMES = ["meta-container", "meta-wrap"];
   function findMetaContainer(node) {
-    const direct = findChildByStructuralName(node, "meta-container");
-    if (direct) return direct;
+    for (const name of META_CONTAINER_NAMES) {
+      const direct = findChildByStructuralName(node, name);
+      if (direct) return direct;
+    }
     const contentContainer = findChildByName(node, "content-container");
-    return contentContainer ? findChildByStructuralName(contentContainer, "meta-container") : null;
+    if (!contentContainer) return null;
+    for (const name of META_CONTAINER_NAMES) {
+      const nested = findChildByStructuralName(contentContainer, name);
+      if (nested) return nested;
+    }
+    return null;
   }
   async function getOwningKey(component) {
     if (component.parent && component.parent.type === "COMPONENT_SET") {

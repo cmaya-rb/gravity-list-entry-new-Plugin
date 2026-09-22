@@ -280,11 +280,26 @@ function findPropAny(instance: InstanceNode, bases: string[]): PropEntry | null 
   return null;
 }
 
+// The old component's meta wrapper is named "meta-container" when
+// `persistent` is true, but "meta-wrap" when `persistent` is false — the
+// non-persistent variant has a structurally different layout (actions only
+// reveal on hover), not just a hidden node. Both names must be treated as
+// the same slot, or a non-persistent instance's real meta content is
+// reported as missing even though it's present.
+const META_CONTAINER_NAMES = ['meta-container', 'meta-wrap'];
+
 function findMetaContainer(node: SceneNode): SceneNode | null {
-  const direct = findChildByStructuralName(node, 'meta-container');
-  if (direct) return direct;
+  for (const name of META_CONTAINER_NAMES) {
+    const direct = findChildByStructuralName(node, name);
+    if (direct) return direct;
+  }
   const contentContainer = findChildByName(node, 'content-container');
-  return contentContainer ? findChildByStructuralName(contentContainer, 'meta-container') : null;
+  if (!contentContainer) return null;
+  for (const name of META_CONTAINER_NAMES) {
+    const nested = findChildByStructuralName(contentContainer, name);
+    if (nested) return nested;
+  }
+  return null;
 }
 
 async function getOwningKey(component: ComponentNode): Promise<{ key: string; name: string }> {
