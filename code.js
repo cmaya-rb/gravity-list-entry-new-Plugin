@@ -106,6 +106,9 @@
   function findActionsFrame(node) {
     return findChildByName(node, "actions") || findChildByPath(node, ["content-container", "actions"]);
   }
+  function findAvatarPicture(avatarNode) {
+    return findChildByName(avatarNode, "picture") || findChildByPath(avatarNode, ["picture-container", "picture"]);
+  }
   function findDescendantInstance(node) {
     if (node.type === "INSTANCE") return node;
     if (!("children" in node)) return null;
@@ -460,7 +463,7 @@
       const initialsProp = findProp(leadingInstance, "initials");
       const pictureProp = findProp(leadingInstance, "picture");
       const pictureNode = findChildByName(leadingInstance, "gravity-avatar") || leadingInstance;
-      const pictureRect = findChildByName(pictureNode, "picture");
+      const pictureRect = findAvatarPicture(pictureNode);
       return {
         type: "avatar",
         avatarInitials: initialsProp ? String(initialsProp.value) : void 0,
@@ -867,6 +870,7 @@
   }
   async function applyMappings(target, snapshot, res, preCapturedMeta) {
     var _a, _b, _c, _d;
+    const warnings = [];
     if (snapshot.variant.width) setPropByBase(target, "size", (_a = WIDTH_TO_SIZE[snapshot.variant.width]) != null ? _a : snapshot.variant.width);
     if (snapshot.variant.type) setPropByBase(target, "type", (_b = TYPE_MAP[snapshot.variant.type]) != null ? _b : snapshot.variant.type);
     setPropByBase(target, "presentational", snapshot.variant.presentational);
@@ -924,8 +928,22 @@
         const img = findChildByName(leadingInstance, "image");
         const imgInner = img ? findChildByName(img, "image") : null;
         const fillTarget = imgInner != null ? imgInner : img;
-        if (fillTarget && snapshot.leading.imageFills && "fills" in fillTarget) {
+        if (!snapshot.leading.imageFills) {
+          warnings.push(
+            `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read) \u2014 new instance kept its default image`
+          );
+        } else if (!fillTarget) {
+          warnings.push(
+            `leading image: new leading's "image" child not found after swap \u2014 new instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
+          );
+        } else if (!("fills" in fillTarget)) {
+          warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property \u2014 new instance kept its default image`);
+        } else {
           fillTarget.fills = snapshot.leading.imageFills;
+          const after = fillsSnapshot(fillTarget);
+          if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.imageFills)) {
+            warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick \u2014 new instance may still show its default image`);
+          }
         }
       } else if (snapshot.leading.type === "icon") {
         if (!snapshot.leading.iconIsDefault && snapshot.leading.iconName) {
@@ -935,9 +953,23 @@
         if (snapshot.leading.avatarInitials !== void 0) setPropByBase(leadingInstance, "initials", snapshot.leading.avatarInitials);
         if (snapshot.leading.avatarPicture !== void 0) setPropByBase(leadingInstance, "picture", snapshot.leading.avatarPicture);
         const avatarNode = findChildByName(leadingInstance, "avatar") || leadingInstance;
-        const pictureRect = findChildByName(avatarNode, "picture");
-        if (pictureRect && snapshot.leading.avatarPictureFill && "fills" in pictureRect) {
+        const pictureRect = findAvatarPicture(avatarNode);
+        if (!snapshot.leading.avatarPictureFill) {
+          if (snapshot.leading.avatarPicture) {
+            warnings.push(`leading avatar: no picture fill was captured from the source instance \u2014 new instance kept its default picture`);
+          }
+        } else if (!pictureRect) {
+          warnings.push(
+            `leading avatar: new leading's "picture" node not found after swap \u2014 new instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
+          );
+        } else if (!("fills" in pictureRect)) {
+          warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property \u2014 new instance kept its default picture`);
+        } else {
           pictureRect.fills = snapshot.leading.avatarPictureFill;
+          const after = fillsSnapshot(pictureRect);
+          if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.avatarPictureFill)) {
+            warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick \u2014 new instance may still show its default picture`);
+          }
         }
       } else if (snapshot.leading.type === "flag") {
         if (snapshot.leading.flagCountryName !== void 0) setPropByBase(leadingInstance, "country-name", snapshot.leading.flagCountryName);
@@ -968,9 +1000,9 @@
       }
       const captured = preCapturedMeta != null ? preCapturedMeta : await captureOverrides(snapshot.metaSlotInstance);
       if (!captured) throw new Error("Could not read the meta slot's current component.");
-      return applyOverrideCapture(newMetaSlot, captured);
+      warnings.push(...await applyOverrideCapture(newMetaSlot, captured));
     }
-    return [];
+    return warnings;
   }
   async function migrateInstance(snapshot, res) {
     if (snapshot.leading && snapshot.leading.type !== "unknown" && !res.newLeadingTypeKeys[snapshot.leading.type]) {
@@ -1008,14 +1040,29 @@
       const preCapturedMeta = snapshot.metaSlotInstance ? await captureOverrides(snapshot.metaSlotInstance) : null;
       try {
         sourceInstance.swapComponent(newMainAsComponent);
+        try {
+          sourceInstance.visible = snapshot.visible;
+        } catch (e) {
+        }
         const warnings = await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
+        const notes = [];
+        if (sourceInstance.visible !== snapshot.visible) {
+          try {
+            sourceInstance.visible = snapshot.visible;
+            notes.push(`visibility reverted to ${!snapshot.visible} after migration \u2014 forced back to ${snapshot.visible} automatically`);
+          } catch (err) {
+            warnings.push(
+              `visibility reverted to ${sourceInstance.visible} after migration (source was ${snapshot.visible}) and could not be forced back: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        }
         const problems = await validateReplacement(sourceInstance, snapshot, res);
         if (problems.length > 0) throw new Error(problems.join("; "));
         return {
           sourceNodeId: snapshot.nodeId,
           replacementNodeId: sourceInstance.id,
           status: warnings.length > 0 ? "manual-review" : "migrated",
-          reason: warnings.length > 0 ? `Swapped in place, but meta overrides did not fully stick: ${warnings.join(" | ")}` : "Validated and swapped in place (nested inside another instance \u2014 cannot be replaced as a separate node)."
+          reason: warnings.length > 0 ? `Swapped in place, but some overrides did not fully stick: ${warnings.join(" | ")}` : notes.length > 0 ? `Validated and swapped in place. ${notes.join(" | ")}` : "Validated and swapped in place (nested inside another instance \u2014 cannot be replaced as a separate node)."
         };
       } catch (err) {
         if (oldMain) {
@@ -1065,7 +1112,7 @@
         sourceNodeId: snapshot.nodeId,
         replacementNodeId: replacement.id,
         status: warnings.length > 0 ? "manual-review" : "migrated",
-        reason: warnings.length > 0 ? `Replaced, but meta overrides did not fully stick: ${warnings.join(" | ")}` : "Validated and replaced."
+        reason: warnings.length > 0 ? `Replaced, but some overrides did not fully stick: ${warnings.join(" | ")}` : "Validated and replaced."
       };
     } catch (err) {
       replacement.remove();

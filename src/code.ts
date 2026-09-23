@@ -239,6 +239,15 @@ function findActionsFrame(node: SceneNode): SceneNode | null {
   return findChildByName(node, 'actions') || findChildByPath(node, ['content-container', 'actions']);
 }
 
+// The avatar's picture rectangle is sometimes a direct child of the avatar
+// instance, sometimes wrapped one level deeper in a "picture-container"
+// frame (confirmed structure: avatar > picture-container > picture) — the
+// initials rectangle is nested the same way, in an "initials-container".
+// Try direct first, then the wrapped path, so this works for either shape.
+function findAvatarPicture(avatarNode: SceneNode): SceneNode | null {
+  return findChildByName(avatarNode, 'picture') || findChildByPath(avatarNode, ['picture-container', 'picture']);
+}
+
 function findDescendantInstance(node: SceneNode): InstanceNode | null {
   if (node.type === 'INSTANCE') return node;
   if (!('children' in node)) return null;
@@ -741,7 +750,7 @@ async function readLeadingSnapshot(instance: InstanceNode): Promise<LeadingSnaps
     const initialsProp = findProp(leadingInstance, 'initials');
     const pictureProp = findProp(leadingInstance, 'picture');
     const pictureNode = findChildByName(leadingInstance, 'gravity-avatar') || leadingInstance;
-    const pictureRect = findChildByName(pictureNode, 'picture');
+    const pictureRect = findAvatarPicture(pictureNode);
     return {
       type: 'avatar',
       avatarInitials: initialsProp ? String(initialsProp.value) : undefined,
@@ -1313,6 +1322,14 @@ async function applyMappings(
   res: Resolution,
   preCapturedMeta?: OverrideCapture | null
 ): Promise<string[]> {
+  // Collects failures that must surface as manual-review rather than fail
+  // silently — e.g. a leading image fill that didn't apply because the
+  // expected child name wasn't found. Previously nothing pushed here except
+  // the meta path (merged in below), so a silent leading failure reported
+  // as a clean "migrated" even though the new instance kept its default
+  // content.
+  const warnings: string[] = [];
+
   // Variant mapping
   if (snapshot.variant.width) setPropByBase(target, 'size', WIDTH_TO_SIZE[snapshot.variant.width] ?? snapshot.variant.width);
   if (snapshot.variant.type) setPropByBase(target, 'type', TYPE_MAP[snapshot.variant.type] ?? snapshot.variant.type);
@@ -1412,8 +1429,25 @@ async function applyMappings(
       const img = findChildByName(leadingInstance, 'image');
       const imgInner = img ? findChildByName(img, 'image') : null;
       const fillTarget = imgInner ?? img;
-      if (fillTarget && snapshot.leading.imageFills && 'fills' in fillTarget) {
+      if (!snapshot.leading.imageFills) {
+        warnings.push(
+          `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read) — new instance kept its default image`
+        );
+      } else if (!fillTarget) {
+        warnings.push(
+          `leading image: new leading's "image" child not found after swap — new instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
+        );
+      } else if (!('fills' in fillTarget)) {
+        warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property — new instance kept its default image`);
+      } else {
         (fillTarget as GeometryMixin).fills = snapshot.leading.imageFills;
+        // swapComponent()/setProperties() can silently no-op a fills write in edge
+        // cases (e.g. the node is fill-locked or bound to a variable) — verify it
+        // actually landed rather than trusting the assignment succeeded.
+        const after = fillsSnapshot(fillTarget);
+        if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.imageFills)) {
+          warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick — new instance may still show its default image`);
+        }
       }
     } else if (snapshot.leading.type === 'icon') {
       if (!snapshot.leading.iconIsDefault && snapshot.leading.iconName) {
@@ -1423,9 +1457,30 @@ async function applyMappings(
       if (snapshot.leading.avatarInitials !== undefined) setPropByBase(leadingInstance, 'initials', snapshot.leading.avatarInitials);
       if (snapshot.leading.avatarPicture !== undefined) setPropByBase(leadingInstance, 'picture', snapshot.leading.avatarPicture);
       const avatarNode = findChildByName(leadingInstance, 'avatar') || leadingInstance;
-      const pictureRect = findChildByName(avatarNode, 'picture');
-      if (pictureRect && snapshot.leading.avatarPictureFill && 'fills' in pictureRect) {
+      const pictureRect = findAvatarPicture(avatarNode);
+      // Same silent-failure class as the leading-image branch above: if the
+      // picture fill can't be captured, found, or doesn't stick, the new
+      // instance keeps its default avatar photo with zero signal that it
+      // happened. Confirmed in practice — multiple avatar rows all ended up
+      // showing the same default picture after a "successful" migration.
+      if (!snapshot.leading.avatarPictureFill) {
+        // No fill was ever captured — this is expected when picture is false
+        // (initials-only avatar), so only warn when a picture was actually set.
+        if (snapshot.leading.avatarPicture) {
+          warnings.push(`leading avatar: no picture fill was captured from the source instance — new instance kept its default picture`);
+        }
+      } else if (!pictureRect) {
+        warnings.push(
+          `leading avatar: new leading's "picture" node not found after swap — new instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
+        );
+      } else if (!('fills' in pictureRect)) {
+        warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property — new instance kept its default picture`);
+      } else {
         (pictureRect as GeometryMixin).fills = snapshot.leading.avatarPictureFill;
+        const after = fillsSnapshot(pictureRect);
+        if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.avatarPictureFill)) {
+          warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick — new instance may still show its default picture`);
+        }
       }
     } else if (snapshot.leading.type === 'flag') {
       if (snapshot.leading.flagCountryName !== undefined) setPropByBase(leadingInstance, 'country-name', snapshot.leading.flagCountryName);
@@ -1469,9 +1524,9 @@ async function applyMappings(
     }
     const captured = preCapturedMeta ?? (await captureOverrides(snapshot.metaSlotInstance!));
     if (!captured) throw new Error("Could not read the meta slot's current component.");
-    return applyOverrideCapture(newMetaSlot, captured);
+    warnings.push(...(await applyOverrideCapture(newMetaSlot, captured)));
   }
-  return [];
+  return warnings;
 }
 
 async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Promise<OutcomeRow> {
@@ -1521,7 +1576,45 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
     const preCapturedMeta = snapshot.metaSlotInstance ? await captureOverrides(snapshot.metaSlotInstance) : null;
     try {
       sourceInstance.swapComponent(newMainAsComponent);
+      // swapComponent() on a node slotted into another instance's overrides
+      // (e.g. a hidden row inside a gravity-accordion-item's body) can orphan
+      // the ANCESTOR's override for this child — Figma tracks that override
+      // against the child's pre-swap identity, and the swap changes it.
+      // Confirmed failure mode: a hidden (visible: false) row came back
+      // visible after migration even though this code never sets visible
+      // to true anywhere.
+      //
+      // Only re-assert `visible` — it's the one confirmed to get orphaned.
+      // Do NOT add opacity/rotation/blendMode here: Figma rejects writes to
+      // "relative-transform" properties (rotation confirmed) on a node
+      // slotted into another instance's auto-layout ("This property cannot
+      // be overridden in an instance"), which aborted the whole migration
+      // for every such instance. Never set a node property here without
+      // confirming Figma actually allows overriding it in this context.
+      try {
+        sourceInstance.visible = snapshot.visible;
+      } catch {
+        // Some slotted contexts may reject even this — don't let a defensive
+        // re-assertion abort a migration that otherwise would have succeeded.
+      }
       const warnings = await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
+      // applyMappings swaps the meta slot too, which is the same kind of
+      // nested-override mutation — check visibility survived that as well,
+      // and force it back rather than silently trusting it did. When this
+      // succeeds it's self-healed and needs no human attention — log it as
+      // an informational note, not a manual-review-triggering warning.
+      // Only an outright failure to force it back belongs in `warnings`.
+      const notes: string[] = [];
+      if (sourceInstance.visible !== snapshot.visible) {
+        try {
+          sourceInstance.visible = snapshot.visible;
+          notes.push(`visibility reverted to ${!snapshot.visible} after migration — forced back to ${snapshot.visible} automatically`);
+        } catch (err) {
+          warnings.push(
+            `visibility reverted to ${sourceInstance.visible} after migration (source was ${snapshot.visible}) and could not be forced back: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
       const problems = await validateReplacement(sourceInstance, snapshot, res);
       if (problems.length > 0) throw new Error(problems.join('; '));
       return {
@@ -1530,8 +1623,10 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
         status: warnings.length > 0 ? 'manual-review' : 'migrated',
         reason:
           warnings.length > 0
-            ? `Swapped in place, but meta overrides did not fully stick: ${warnings.join(' | ')}`
-            : 'Validated and swapped in place (nested inside another instance — cannot be replaced as a separate node).',
+            ? `Swapped in place, but some overrides did not fully stick: ${warnings.join(' | ')}`
+            : notes.length > 0
+              ? `Validated and swapped in place. ${notes.join(' | ')}`
+              : 'Validated and swapped in place (nested inside another instance — cannot be replaced as a separate node).',
       };
     } catch (err) {
       if (oldMain) {
@@ -1592,7 +1687,7 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
       sourceNodeId: snapshot.nodeId,
       replacementNodeId: replacement.id,
       status: warnings.length > 0 ? 'manual-review' : 'migrated',
-      reason: warnings.length > 0 ? `Replaced, but meta overrides did not fully stick: ${warnings.join(' | ')}` : 'Validated and replaced.',
+      reason: warnings.length > 0 ? `Replaced, but some overrides did not fully stick: ${warnings.join(' | ')}` : 'Validated and replaced.',
     };
   } catch (err) {
     replacement.remove();
