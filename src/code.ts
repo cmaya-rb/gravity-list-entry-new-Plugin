@@ -85,6 +85,7 @@ interface InstanceSnapshot {
     persistent: boolean | null;
   };
   leading: LeadingSnapshot | null;
+  leadingDiagnostic: string | null; // set when leading couldn't be read at all, so a real failure is never silently treated as "no leading"
   action: ActionSnapshot;
   metaSlotInstance: InstanceNode | null; // live ref to the instance slotted into meta — carried through, never re-resolved by key
   metaDiagnostic: string | null; // set when metaSlotInstance couldn't be resolved, describing what was found instead
@@ -129,8 +130,20 @@ let componentIndex: Map<string, ComponentNode | ComponentSetNode> | null = null;
 // once, lazily, the first time the fast paths fail to resolve a key.
 let instanceIndexBuilt = false;
 
+// Scoped to the current selection only — never the whole document. This
+// plugin's UI only ever migrates the current selection, so resolving
+// components by scanning every page was pure overhead (and slow on large
+// files) for a case that never happens here. The tradeoff, chosen
+// deliberately: if a private/unpublished component (like a specific
+// leading type) doesn't have an example inside the selection, resolution
+// fails for it — the consumer must include a reference instance in their
+// selection (already the documented workflow), rather than the plugin
+// silently searching the rest of the file for one.
+function selectionRoots(): readonly BaseNode[] {
+  return figma.currentPage.selection;
+}
+
 async function buildComponentIndex(): Promise<Map<string, ComponentNode | ComponentSetNode>> {
-  await figma.loadAllPagesAsync();
   const index = new Map<string, ComponentNode | ComponentSetNode>();
   function visit(node: BaseNode): void {
     if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
@@ -140,7 +153,7 @@ async function buildComponentIndex(): Promise<Map<string, ComponentNode | Compon
       for (const child of (node as unknown as ChildrenMixin).children) visit(child as unknown as BaseNode);
     }
   }
-  for (const page of figma.root.children) visit(page);
+  for (const root of selectionRoots()) visit(root);
   return index;
 }
 
@@ -152,7 +165,7 @@ async function indexInstancesByMainComponentKey(index: Map<string, ComponentNode
       for (const child of (node as unknown as ChildrenMixin).children) visit(child as unknown as BaseNode);
     }
   }
-  for (const page of figma.root.children) visit(page);
+  for (const root of selectionRoots()) visit(root);
   // Dispatched in parallel — sequential awaits over potentially thousands of
   // nested instances (buttons, badges, spacers inside panel mockups, etc.)
   // would make this feel hung rather than merely slow.
@@ -441,7 +454,7 @@ async function resolveOldReference(
       } else {
         const leadingOwning = await getInstanceOwningKey(leadingInstance);
         if (!leadingOwning) {
-          diagnostics.push('OLD: found the leading instance but could not read its main component (getMainComponentAsync returned null — possibly detached).');
+          diagnostics.push('OLD: found the leading instance but could not read its main component (getMainComponentAsync returned null, possibly detached).');
         }
         leadingSetKey = leadingOwning?.key ?? null;
       }
@@ -505,7 +518,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
         diagnostics.push('Could not determine the leading\'s component set.');
       } else if (oldLeadingSetKey && leadingSet.key === oldLeadingSetKey) {
         diagnostics.push(
-          'This reference\'s leading is still on the OLD leading component set — cannot auto-resolve from it. Use "Capture selection as LEADING SET" on a confirmed-correct leading instead.'
+          'This reference\'s leading is still on the OLD leading component set, so it cannot be auto-resolved. Use "Capture selection as LEADING SET" on a confirmed-correct leading instead.'
         );
       } else if (oldLeadingSetKey && leadingSet.key !== oldLeadingSetKey) {
         Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet)); // definitely not old — accept
@@ -515,7 +528,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
         leadingSetKey = leadingSet.key;
       } else {
         diagnostics.push(
-          `Cannot verify this leading automatically — its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
+          `Cannot verify this leading automatically: its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
         );
       }
     } else {
@@ -559,7 +572,7 @@ async function resolveNewReference(nodeId: string, oldLeadingSetKey: string | nu
 }
 
 async function scanForLeadingTypeExamples(newMainKey: string, leadingTypeKeys: Partial<Record<LeadingType, LeadingKeyInfo>>): Promise<void> {
-  await figma.loadAllPagesAsync();
+  // Selection-scoped, same reasoning as buildComponentIndex above.
   const instances: InstanceNode[] = [];
   function visit(node: BaseNode): void {
     if ((node as SceneNode).type === 'INSTANCE') instances.push(node as InstanceNode);
@@ -567,7 +580,7 @@ async function scanForLeadingTypeExamples(newMainKey: string, leadingTypeKeys: P
       for (const child of (node as unknown as ChildrenMixin).children) visit(child as unknown as BaseNode);
     }
   }
-  for (const page of figma.root.children) visit(page);
+  for (const root of selectionRoots()) visit(root);
 
   await Promise.all(
     instances.map(async (inst) => {
@@ -728,23 +741,30 @@ async function findComponentCandidates(scope: ScopeConfig): Promise<CandidateInf
 // rule 10: nested state must be read before the main component swap).
 // ---------------------------------------------------------------------------
 
-async function readLeadingSnapshot(instance: InstanceNode): Promise<LeadingSnapshot | null> {
+async function readLeadingSnapshot(instance: InstanceNode): Promise<{ leading: LeadingSnapshot; leadingDiagnostic: null } | { leading: null; leadingDiagnostic: string }> {
   const leadingWrap = findChildByStructuralName(instance, 'leading');
-  if (!leadingWrap) return null;
+  if (!leadingWrap) {
+    return { leading: null, leadingDiagnostic: `no "leading" child found. Top-level children: ${childNameList(instance)}` };
+  }
   const leadingInstance = findDescendantInstance(leadingWrap);
-  if (!leadingInstance) return null;
+  if (!leadingInstance) {
+    return {
+      leading: null,
+      leadingDiagnostic: `found a "leading" child (type ${leadingWrap.type}) but it isn't/doesn't contain an instance. Its children: ${childNameList(leadingWrap)}`,
+    };
+  }
 
   const typeProp = findProp(leadingInstance, 'type');
   const type = typeProp ? (String(typeProp.value).toLowerCase() as LeadingType) : null;
 
   if (type === 'image') {
     const img = findChildByName(leadingInstance, 'image');
-    return { type: 'image', imageFills: fillsSnapshot(img) };
+    return { leading: { type: 'image', imageFills: fillsSnapshot(img) }, leadingDiagnostic: null };
   }
   if (type === 'icon') {
     const iconNameProp = findProp(leadingInstance, 'icon-name');
     const iconName = iconNameProp ? String(iconNameProp.value) : undefined;
-    return { type: 'icon', iconName, iconIsDefault: !iconName || iconName === 'gravity-icon-bull' };
+    return { leading: { type: 'icon', iconName, iconIsDefault: !iconName || iconName === 'gravity-icon-bull' }, leadingDiagnostic: null };
   }
   if (type === 'avatar') {
     const initialsProp = findProp(leadingInstance, 'initials');
@@ -752,22 +772,33 @@ async function readLeadingSnapshot(instance: InstanceNode): Promise<LeadingSnaps
     const pictureNode = findChildByName(leadingInstance, 'gravity-avatar') || leadingInstance;
     const pictureRect = findAvatarPicture(pictureNode);
     return {
-      type: 'avatar',
-      avatarInitials: initialsProp ? String(initialsProp.value) : undefined,
-      avatarPicture: pictureProp ? Boolean(pictureProp.value) : undefined,
-      avatarPictureFill: fillsSnapshot(pictureRect),
+      leading: {
+        type: 'avatar',
+        avatarInitials: initialsProp ? String(initialsProp.value) : undefined,
+        avatarPicture: pictureProp ? Boolean(pictureProp.value) : undefined,
+        avatarPictureFill: fillsSnapshot(pictureRect),
+      },
+      leadingDiagnostic: null,
     };
   }
   if (type === 'flag') {
     const countryProp = findProp(leadingInstance, 'country-name');
     const codeProp = findProp(leadingInstance, 'code');
     return {
-      type: 'flag',
-      flagCountryName: countryProp ? String(countryProp.value) : undefined,
-      flagCode: codeProp ? String(codeProp.value) : undefined,
+      leading: {
+        type: 'flag',
+        flagCountryName: countryProp ? String(countryProp.value) : undefined,
+        flagCode: codeProp ? String(codeProp.value) : undefined,
+      },
+      leadingDiagnostic: null,
     };
   }
-  return { type: 'unknown' };
+  return {
+    leading: null,
+    leadingDiagnostic: `leading instance found but has no recognizable "type" property (raw value: ${typeProp ? String(typeProp.value) : 'not found'}). Leading instance's properties: ${Object.keys(
+      leadingInstance.componentProperties || {}
+    ).join(', ')}`,
+  };
 }
 
 function readActionSnapshot(instance: InstanceNode, hasAction: boolean): ActionSnapshot {
@@ -808,7 +839,7 @@ async function readMetaInfo(instance: InstanceNode): Promise<{ metaSlotInstance:
   if (!metaContainer || !('children' in metaContainer)) {
     return {
       metaSlotInstance: null,
-      metaDiagnostic: `no meta-container found — top-level children: ${childNameList(instance)}`,
+      metaDiagnostic: `no meta-container found. Top-level children: ${childNameList(instance)}`,
     };
   }
   // Not name-matched: once a consumer picks real meta content, that
@@ -820,7 +851,7 @@ async function readMetaInfo(instance: InstanceNode): Promise<{ metaSlotInstance:
   if (!metaSlot) {
     return {
       metaSlotInstance: null,
-      metaDiagnostic: `meta-container "${metaContainer.name}" found, but no instance inside it at all — its children: ${childNameList(metaContainer)}`,
+      metaDiagnostic: `meta-container "${metaContainer.name}" found, but no instance inside it at all. Its children: ${childNameList(metaContainer)}`,
     };
   }
   return { metaSlotInstance: metaSlot, metaDiagnostic: null };
@@ -860,7 +891,8 @@ async function auditInstance(instance: InstanceNode): Promise<InstanceSnapshot> 
   // If ~leading is explicitly false, the leading isn't shown at all — its
   // internal type doesn't matter and must not be resolved/enforced (that's
   // what was blocking migration on rows with a hidden, unresolvable type).
-  const leading = leadingBoolProp && leadingBoolProp.value === false ? null : await readLeadingSnapshot(instance);
+  const leadingResult =
+    leadingBoolProp && leadingBoolProp.value === false ? { leading: null, leadingDiagnostic: null } : await readLeadingSnapshot(instance);
   const action = readActionSnapshot(instance, variant.action);
   const meta = await readMetaInfo(instance);
 
@@ -894,7 +926,8 @@ async function auditInstance(instance: InstanceNode): Promise<InstanceSnapshot> 
       meta: metaBoolProp ? Boolean(metaBoolProp.value) : null,
       persistent: persistentProp ? Boolean(persistentProp.value) : null,
     },
-    leading,
+    leading: leadingResult.leading,
+    leadingDiagnostic: leadingResult.leadingDiagnostic,
     action,
     metaSlotInstance: meta.metaSlotInstance,
     metaDiagnostic: meta.metaDiagnostic,
@@ -924,6 +957,21 @@ function gateCheck(snapshots: InstanceSnapshot[], res: Resolution): { ok: boolea
   const actionMissing = needsAction && !res.newActionKey;
   const ok = missingLeadingTypes.length === 0 && !actionMissing;
   return { ok, missingLeadingTypes, needsAction, actionMissing };
+}
+
+// Shared by the scan-time preview (find-components) and the actual
+// pre-migration gate (migrate) so the wording never drifts between the
+// warning you see before clicking Migrate and the error you'd otherwise
+// only see after.
+function describeGateFailure(gate: ReturnType<typeof gateCheck>): string {
+  const parts: string[] = [];
+  if (gate.missingLeadingTypes.length > 0) {
+    parts.push(`leading type${gate.missingLeadingTypes.length === 1 ? '' : 's'} "${gate.missingLeadingTypes.join('", "')}"`);
+  }
+  if (gate.actionMissing) parts.push('the action component');
+  return `Could not resolve ${parts.join(' and ')} on gravity-list-entry-new. Make sure your selection includes an instance of gravity-list-entry-new that already uses ${
+    parts.length > 1 ? 'these' : 'it'
+  }.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,7 +1309,7 @@ async function applyOverrideCapture(target: InstanceNode, captured: OverrideCapt
   for (const { path, props } of nested) {
     const targetNode = findChildByIndexPath(target, path);
     if (!targetNode || targetNode.type !== 'INSTANCE') {
-      warnings.push(`meta nested instance at [${path.join(',')}] not found post-swap — its ${Object.keys(props).length} prop(s) dropped`);
+      warnings.push(`meta nested instance at [${path.join(',')}] not found post-swap, its ${Object.keys(props).length} prop(s) dropped`);
       continue;
     }
     applyProps(targetNode as InstanceNode, props, `meta nested [${path.join(',')}] prop`);
@@ -1290,7 +1338,7 @@ async function applyOverrideCapture(target: InstanceNode, captured: OverrideCapt
   for (const o of captured.styles) {
     const targetNode = findChildByIndexPath(target, o.path);
     if (!targetNode) {
-      warnings.push(`meta node [${o.path.join(',')}] "${o.name}" missing post-swap — its style overrides dropped`);
+      warnings.push(`meta node [${o.path.join(',')}] "${o.name}" missing post-swap, its style overrides dropped`);
       continue;
     }
     await applyNodeStyle(targetNode, o, warnings);
@@ -1364,6 +1412,15 @@ async function applyMappings(
   if (snapshot.heading !== null) setPropByBase(target, 'heading', snapshot.heading);
   if (snapshot.description !== null) setPropByBase(target, 'description', snapshot.description);
 
+  // Never silently treat a real leading-read failure as "no leading": if
+  // ~leading isn't explicitly false but the leading couldn't be read at all
+  // (wrapper not found, no instance inside it, or type unrecognized), that's
+  // a resolution failure, not an absent leading — refuse to migrate and
+  // silently reset it, same contract as the meta check below.
+  if (snapshot.bool.leading !== false && !snapshot.leading) {
+    throw new Error(`Instance has a visible leading but its content could not be read. Refusing to migrate and silently reset it. ${snapshot.leadingDiagnostic ?? ''}`);
+  }
+
   // Leading — switch type via setProperties, never via import/swapComponent.
   // The leading is a private nested component (per spec) that cannot be
   // resolved by key at all, locally or via library import — the only
@@ -1420,7 +1477,7 @@ async function applyMappings(
       const finalOwning = await getInstanceOwningKey(leadingInstance);
       if (finalOwning && finalOwning.key === res.oldLeadingSetKey) {
         throw new Error(
-          'Leading resolved to the OLD leading set despite matching the captured key — the captured leading data is wrong. Re-run "Capture selection as LEADING SET" pointing at a confirmed-correct leading.'
+          'Leading resolved to the OLD leading set despite matching the captured key, so the captured leading data is wrong. Re-run "Capture selection as LEADING SET" pointing at a confirmed-correct leading.'
         );
       }
     }
@@ -1431,14 +1488,14 @@ async function applyMappings(
       const fillTarget = imgInner ?? img;
       if (!snapshot.leading.imageFills) {
         warnings.push(
-          `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read) — new instance kept its default image`
+          `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read). New instance kept its default image`
         );
       } else if (!fillTarget) {
         warnings.push(
-          `leading image: new leading's "image" child not found after swap — new instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
+          `leading image: new leading's "image" child not found after swap. New instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
         );
       } else if (!('fills' in fillTarget)) {
-        warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property — new instance kept its default image`);
+        warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property. New instance kept its default image`);
       } else {
         (fillTarget as GeometryMixin).fills = snapshot.leading.imageFills;
         // swapComponent()/setProperties() can silently no-op a fills write in edge
@@ -1446,7 +1503,7 @@ async function applyMappings(
         // actually landed rather than trusting the assignment succeeded.
         const after = fillsSnapshot(fillTarget);
         if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.imageFills)) {
-          warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick — new instance may still show its default image`);
+          warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick. New instance may still show its default image`);
         }
       }
     } else if (snapshot.leading.type === 'icon') {
@@ -1467,19 +1524,19 @@ async function applyMappings(
         // No fill was ever captured — this is expected when picture is false
         // (initials-only avatar), so only warn when a picture was actually set.
         if (snapshot.leading.avatarPicture) {
-          warnings.push(`leading avatar: no picture fill was captured from the source instance — new instance kept its default picture`);
+          warnings.push(`leading avatar: no picture fill was captured from the source instance. New instance kept its default picture`);
         }
       } else if (!pictureRect) {
         warnings.push(
-          `leading avatar: new leading's "picture" node not found after swap — new instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
+          `leading avatar: new leading's "picture" node not found after swap. New instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
         );
       } else if (!('fills' in pictureRect)) {
-        warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property — new instance kept its default picture`);
+        warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property. New instance kept its default picture`);
       } else {
         (pictureRect as GeometryMixin).fills = snapshot.leading.avatarPictureFill;
         const after = fillsSnapshot(pictureRect);
         if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.avatarPictureFill)) {
-          warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick — new instance may still show its default picture`);
+          warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick. New instance may still show its default picture`);
         }
       }
     } else if (snapshot.leading.type === 'flag') {
@@ -1509,7 +1566,7 @@ async function applyMappings(
   // structurally forbids that inside an instance's tree.
   if (snapshot.bool.meta === true && !snapshot.metaSlotInstance && !preCapturedMeta) {
     throw new Error(
-      `Instance has meta enabled but its meta slot content could not be read — refusing to migrate and silently reset it. ${snapshot.metaDiagnostic ?? ''}`
+      `Instance has meta enabled but its meta slot content could not be read. Refusing to migrate and silently reset it. ${snapshot.metaDiagnostic ?? ''}`
     );
   }
   if (snapshot.metaSlotInstance || preCapturedMeta) {
@@ -1517,7 +1574,7 @@ async function applyMappings(
     const newMetaSlot = newMetaContainer ? findDescendantInstance(newMetaContainer) : null;
     if (!newMetaSlot) {
       throw new Error(
-        `Could not preserve meta content — no instance found inside the new instance's meta-container. ${
+        `Could not preserve meta content. No instance found inside the new instance's meta-container. ${
           newMetaContainer ? `Its children: ${childNameList(newMetaContainer)}` : 'meta-container itself not found.'
         }`
       );
@@ -1534,7 +1591,7 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
     return {
       sourceNodeId: snapshot.nodeId,
       status: 'skipped',
-      reason: `Required leading type "${snapshot.leading.type}" could not be resolved on the new component — never falling back to a different type.`,
+      reason: `Required leading type "${snapshot.leading.type}" could not be resolved on the new component. Never falling back to a different type.`,
     };
   }
   if (snapshot.variant.action && !res.newActionKey) {
@@ -1597,6 +1654,17 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
         // Some slotted contexts may reject even this — don't let a defensive
         // re-assertion abort a migration that otherwise would have succeeded.
       }
+      // Same node, same reactions — swapComponent() shouldn't touch them,
+      // but re-assert anyway (wrapped, non-fatal) rather than assume, given
+      // the visible-orphaning surprise above. Prototype reactions must
+      // survive migration in both paths, not just this one.
+      if (snapshot.reactions !== undefined && 'reactions' in sourceInstance) {
+        try {
+          await setViaAsyncOrAssign(sourceInstance, 'setReactionsAsync', 'reactions', snapshot.reactions);
+        } catch {
+          // Non-fatal — same reasoning as the visible re-assertion above.
+        }
+      }
       const warnings = await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
       // applyMappings swaps the meta slot too, which is the same kind of
       // nested-override mutation — check visibility survived that as well,
@@ -1608,7 +1676,7 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
       if (sourceInstance.visible !== snapshot.visible) {
         try {
           sourceInstance.visible = snapshot.visible;
-          notes.push(`visibility reverted to ${!snapshot.visible} after migration — forced back to ${snapshot.visible} automatically`);
+          notes.push(`visibility reverted to ${!snapshot.visible} after migration, forced back to ${snapshot.visible} automatically`);
         } catch (err) {
           warnings.push(
             `visibility reverted to ${sourceInstance.visible} after migration (source was ${snapshot.visible}) and could not be forced back: ${err instanceof Error ? err.message : String(err)}`
@@ -1626,7 +1694,7 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
             ? `Swapped in place, but some overrides did not fully stick: ${warnings.join(' | ')}`
             : notes.length > 0
               ? `Validated and swapped in place. ${notes.join(' | ')}`
-              : 'Validated and swapped in place (nested inside another instance — cannot be replaced as a separate node).',
+              : 'Validated and swapped in place (nested inside another instance, cannot be replaced as a separate node).',
       };
     } catch (err) {
       if (oldMain) {
@@ -1639,7 +1707,7 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
       return {
         sourceNodeId: snapshot.nodeId,
         status: 'failed',
-        reason: `${err instanceof Error ? err.message : String(err)} — reverted component reference; some property overrides made before the failure may remain changed.`,
+        reason: `${err instanceof Error ? err.message : String(err)}. Reverted component reference; some property overrides made before the failure may remain changed.`,
       };
     }
   }
@@ -1673,6 +1741,13 @@ async function migrateInstance(snapshot: InstanceSnapshot, res: Resolution): Pro
     if (snapshot.layoutAlign && 'layoutAlign' in replacement) (replacement as unknown as { layoutAlign: string }).layoutAlign = snapshot.layoutAlign;
     if (snapshot.layoutPositioning && 'layoutPositioning' in replacement)
       (replacement as unknown as { layoutPositioning: string }).layoutPositioning = snapshot.layoutPositioning;
+    // A freshly created instance starts with zero reactions — unlike the
+    // swap-in-place path above, this is a brand new node, so reactions must
+    // be copied explicitly or the row silently loses its click/hover
+    // behavior (e.g. "navigate to another frame") on migration.
+    if (snapshot.reactions !== undefined && 'reactions' in replacement) {
+      await setViaAsyncOrAssign(replacement, 'setReactionsAsync', 'reactions', snapshot.reactions);
+    }
 
     const warnings = await applyMappings(replacement, snapshot, res, preCapturedMetaTopLevel);
 
@@ -1743,7 +1818,7 @@ function buildReport(scopeLabel: string, sourceCount: number, outcomes: OutcomeR
 
   const exceptionLines = outcomes
     .filter((o) => o.status !== 'migrated')
-    .map((o) => `- ${o.sourceNodeId}${o.replacementNodeId ? ` / ${o.replacementNodeId}` : ''} — ${o.status} — ${o.reason}`)
+    .map((o) => `- ${o.sourceNodeId}${o.replacementNodeId ? ` / ${o.replacementNodeId}` : ''}: ${o.status}, ${o.reason}`)
     .join('\n');
 
   return [
@@ -1810,6 +1885,20 @@ async function captureReference(nodeId: string, role: 'old' | 'new'): Promise<vo
 figma.ui.onmessage = async (msg: any) => {
   try {
     if (msg.type === 'find-components') {
+      // Distinguish "you selected nothing" from "you selected the wrong
+      // things" — both used to produce the identical generic "not found"
+      // message, which reads like the second case even when the real
+      // problem is the first (nothing to even look at).
+      if (msg.scope?.mode === 'selection' && figma.currentPage.selection.length === 0) {
+        figma.ui.postMessage({
+          type: 'find-results',
+          candidates: [],
+          notes: ['Nothing selected. Select the frames or instances you want to migrate, then scan again.'],
+          resolution,
+        });
+        return;
+      }
+
       const candidates = await findComponentCandidates(msg.scope);
       const notes: string[] = [];
 
@@ -1831,8 +1920,36 @@ figma.ui.onmessage = async (msg: any) => {
           notes.push(`No ${label} found in the current selection.`);
         } else {
           notes.push(
-            `Found ${matches.length} different components named "${label}" — cannot pick automatically. Narrow your selection so only the correct one is included, then scan again.`
+            `Found ${matches.length} different components named "${label}". Cannot pick automatically. Narrow your selection so only the correct one is included, then scan again.`
           );
+        }
+      }
+
+      // Preview the pre-migration gate now, at scan time, instead of only
+      // discovering a missing leading type or action component after
+      // clicking Migrate. Only meaningful once both main components are
+      // actually resolved — with either one missing, the per-role notes
+      // above already explain what to fix first.
+      if (resolution?.oldMainKey && resolution?.newMainKey) {
+        try {
+          const previewRoots = await getScopeRoots(msg.scope);
+          const previewInstances = await collectInstances(previewRoots);
+          const { migratable: previewMigratable } = await classifyInstances(previewInstances, resolution);
+          const previewSnapshots: InstanceSnapshot[] = [];
+          for (const inst of previewMigratable) {
+            try {
+              previewSnapshots.push(await auditInstance(inst));
+            } catch {
+              // A single unreadable instance shouldn't block the gate preview
+              // for everything else — the real migration run will still
+              // report it individually if it's still broken by then.
+            }
+          }
+          const gate = gateCheck(previewSnapshots, resolution);
+          if (!gate.ok) notes.push(describeGateFailure(gate));
+        } catch {
+          // Non-fatal: this is only a preview. If it fails for some reason,
+          // the real gate check at migrate time is still the source of truth.
         }
       }
 
@@ -1852,54 +1969,85 @@ figma.ui.onmessage = async (msg: any) => {
       const allInstances = await collectInstances(roots);
       const { migratable, alreadyMigrated } = await classifyInstances(allInstances, resolution);
 
+      // One instance's audit throwing for an unexpected reason (e.g. a
+      // corrupted or half-detached node) must not lose the whole batch's
+      // report — isolate it to a single 'failed' row and keep auditing the
+      // rest, instead of letting the exception escape to the outer catch
+      // and discard every result gathered so far.
       const snapshots: InstanceSnapshot[] = [];
-      for (const inst of migratable) snapshots.push(await auditInstance(inst));
+      const auditFailures: OutcomeRow[] = [];
+      for (const inst of migratable) {
+        try {
+          snapshots.push(await auditInstance(inst));
+        } catch (err) {
+          auditFailures.push({
+            sourceNodeId: inst.id,
+            status: 'failed',
+            reason: `Could not read this instance's current state: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      }
 
       const gate = gateCheck(snapshots, resolution);
       if (!gate.ok) {
-        const parts: string[] = [];
-        if (gate.missingLeadingTypes.length > 0) {
-          parts.push(`leading type${gate.missingLeadingTypes.length === 1 ? '' : 's'} "${gate.missingLeadingTypes.join('", "')}"`);
-        }
-        if (gate.actionMissing) parts.push('the action component');
         figma.ui.postMessage({
           type: 'error',
-          message: `Could not resolve ${parts.join(' and ')} on gravity-list-entry-new. Halted before making any changes — make sure your selection includes an instance of gravity-list-entry-new that already uses ${
-            parts.length > 1 ? 'these' : 'it'
-          }, then scan and migrate again.`,
+          message: `${describeGateFailure(gate)} Halted before making any changes. Then scan and migrate again.`,
         });
         return;
       }
 
-      const outcomes: OutcomeRow[] = alreadyMigrated.map((inst) => ({
-        sourceNodeId: inst.id,
-        status: 'already-migrated',
-        reason: 'Already on gravity-list-entry-new; skipped for idempotency.',
-      }));
+      const outcomes: OutcomeRow[] = [
+        ...alreadyMigrated.map((inst) => ({
+          sourceNodeId: inst.id,
+          status: 'already-migrated' as const,
+          reason: 'Already on gravity-list-entry-new; skipped for idempotency.',
+        })),
+        ...auditFailures,
+      ];
+
+      const sourceCount = migratable.length + alreadyMigrated.length;
+      // Shared by every progress tick AND the final message, so the report
+      // is never something that only exists once the loop fully completes —
+      // if the plugin gets killed or crashes for a reason outside any of the
+      // per-instance try/catches above, the last progress tick the UI
+      // received is still a real, accurate partial report, not nothing.
+      const buildLiveSummary = () => {
+        const count = (...statuses: OutcomeStatus[]) => outcomes.filter((o) => statuses.includes(o.status)).length;
+        return {
+          summary: {
+            scope: scopeLabel(scope),
+            source: sourceCount,
+            migrated: count('migrated'),
+            skipped: count('skipped', 'already-migrated'),
+            failed: count('failed'),
+            manualReview: count('manual-review'),
+          },
+          exceptions: outcomes
+            .filter((o) => o.status !== 'migrated')
+            .map((o) => ({ id: o.sourceNodeId, replacementId: o.replacementNodeId, status: o.status, reason: o.reason })),
+        };
+      };
 
       for (let i = 0; i < snapshots.length; i++) {
-        const outcome = await migrateInstance(snapshots[i], resolution);
-        outcomes.push(outcome);
-        figma.ui.postMessage({ type: 'progress', done: i + 1, total: snapshots.length });
+        // Defensive per-instance isolation: migrateInstance already converts
+        // its own known failure modes into a 'failed' row internally, but an
+        // unanticipated throw here must still not take down the rest of the
+        // batch — same reasoning as the audit loop above.
+        try {
+          outcomes.push(await migrateInstance(snapshots[i], resolution));
+        } catch (err) {
+          outcomes.push({
+            sourceNodeId: snapshots[i].nodeId,
+            status: 'failed',
+            reason: `Unexpected error migrating this instance: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        figma.ui.postMessage({ type: 'progress', done: i + 1, total: snapshots.length, ...buildLiveSummary() });
       }
 
-      const report = buildReport(scopeLabel(scope), migratable.length + alreadyMigrated.length, outcomes);
-      const count = (...statuses: OutcomeStatus[]) => outcomes.filter((o) => statuses.includes(o.status)).length;
-      figma.ui.postMessage({
-        type: 'report',
-        report,
-        summary: {
-          scope: scopeLabel(scope),
-          source: migratable.length + alreadyMigrated.length,
-          migrated: count('migrated'),
-          skipped: count('skipped', 'already-migrated'),
-          failed: count('failed'),
-          manualReview: count('manual-review'),
-        },
-        exceptions: outcomes
-          .filter((o) => o.status !== 'migrated')
-          .map((o) => ({ id: o.sourceNodeId, replacementId: o.replacementNodeId, status: o.status, reason: o.reason })),
-      });
+      const report = buildReport(scopeLabel(scope), sourceCount, outcomes);
+      figma.ui.postMessage({ type: 'report', report, ...buildLiveSummary() });
       return;
     }
 

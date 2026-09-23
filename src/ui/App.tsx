@@ -5,7 +5,6 @@ import {
   GravityList,
   GravityButton,
   GravityPanel,
-  GravityStatusBadge,
   GravityText,
 } from '@gravity/web-components-react';
 
@@ -118,6 +117,12 @@ export function App() {
           break;
         case 'progress':
           setMigrate({ kind: 'running', done: msg.done, total: msg.total });
+          // Every progress tick carries the same summary/exceptions shape as
+          // the final report, so the Report section is always showing a real,
+          // accurate partial result — not just a done/total counter — even if
+          // the run never reaches a final 'report' message.
+          setSummary(msg.summary ?? null);
+          setExceptions(msg.exceptions ?? []);
           break;
         case 'report':
           setMigrate({ kind: 'done' });
@@ -142,7 +147,7 @@ export function App() {
   const oldCount = countFor('old');
   const newCount = countFor('new');
   const unrecognised = candidates.filter((c) => c.role === null);
-  const scanMessage = scanned && candidates.length === 0 ? 'No matching instances found in the current selection.' : notes[0] ?? null;
+  const scanMessage = notes[0] ?? (scanned && candidates.length === 0 ? 'No matching instances found in the current selection.' : null);
 
 
   const scan = () => {
@@ -151,7 +156,10 @@ export function App() {
     post({ type: 'find-components', scope: { mode: 'selection' } });
   };
 
-  const canMigrate = !!resolution?.oldMainKey && !!resolution?.newMainKey && migrate.kind !== 'running';
+  // notes[] also carries the scan-time gate-failure preview (missing leading
+  // type / action component) whenever both main components ARE resolved, so
+  // this correctly blocks Migrate for that case too, not just unresolved refs.
+  const canMigrate = !!resolution?.oldMainKey && !!resolution?.newMainKey && notes.length === 0 && migrate.kind !== 'running';
 
   const runMigrate = () => {
     setMigrate({ kind: 'running', done: 0, total: 0 });
@@ -162,13 +170,13 @@ export function App() {
 
   const copyResults = () => {
     const lines = [
-      `Scope: ${summary?.scope ?? '—'}`,
+      `Scope: ${summary?.scope ?? 'n/a'}`,
       `Source instances: ${summary?.source ?? 0}`,
       `Migrated: ${summary?.migrated ?? 0}`,
       `Skipped: ${summary?.skipped ?? 0}`,
       `Failed: ${summary?.failed ?? 0}`,
       ...(summary && summary.manualReview > 0 ? [`Manual review: ${summary.manualReview}`] : []),
-      ...(exceptions.length > 0 ? ['', 'Exceptions:', ...exceptions.map((e) => `${e.id} — ${e.status} — ${e.reason}`)] : []),
+      ...(exceptions.length > 0 ? ['', 'Exceptions:', ...exceptions.map((e) => `${e.id}: ${e.status}, ${e.reason}`)] : []),
     ];
     const text = lines.join('\n');
     if (navigator.clipboard?.writeText) {
@@ -234,29 +242,14 @@ export function App() {
       </GravityPanel>
 
       <GravityPanel heading="2. Migrate">
-        <div slot="controls">
-          {(canMigrate || migrate.kind !== 'idle') && (
-            <GravityStatusBadge status={migrate.kind === 'done' ? 'success' : migrate.kind === 'error' ? 'danger' : migrate.kind === 'running' ? 'processing' : 'inactive'}>
-              {migrate.kind === 'done'
-                ? 'done'
-                : migrate.kind === 'error'
-                  ? 'error'
-                  : migrate.kind === 'running'
-                    ? migrate.total > 0
-                      ? `${migrate.done}/${migrate.total} migrated`
-                      : 'starting'
-                    : 'ready for migration'}
-            </GravityStatusBadge>
-          )}
-        </div>
         <div slot="body" className="stack">
           <GravityText size="x-small" color="dark-subtle">
             Review the results above, then migrate your current selection.
           </GravityText>
           {migrate.kind === 'error' && <GravityCallout type="warning" showIcon iconName="warning" title="Migration failed" message={migrate.message} />}
-          {migrate.kind === 'done' && (
+          {(migrate.kind === 'running' || migrate.kind === 'done') && (
             <GravityAccordionItem
-              heading="Results"
+              heading="Report"
               type="boxed"
               size="small"
               expanded={resultsOpen}
@@ -267,6 +260,17 @@ export function App() {
               }}
               onActionClicked={() => copyResults()}
             >
+              <div slot="meta">
+                <GravityText size="xx-small" color="dark-subtle" className="nowrap">
+                  {migrate.kind === 'running'
+                    ? migrate.total > 0
+                      ? `${migrate.done}/${migrate.total}`
+                      : 'starting'
+                    : summary
+                      ? `${summary.migrated} migrated, ${summary.failed} failed`
+                      : ''}
+                </GravityText>
+              </div>
               <div slot="body" className="stack">
                 {summary ? (
                   <div className="stack-xx-tight">
