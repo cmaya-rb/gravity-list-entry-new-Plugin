@@ -22,8 +22,10 @@
   var resolution = null;
   var componentIndex = null;
   var instanceIndexBuilt = false;
+  function selectionRoots() {
+    return figma.currentPage.selection;
+  }
   async function buildComponentIndex() {
-    await figma.loadAllPagesAsync();
     const index = /* @__PURE__ */ new Map();
     function visit(node) {
       if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
@@ -33,7 +35,7 @@
         for (const child of node.children) visit(child);
       }
     }
-    for (const page of figma.root.children) visit(page);
+    for (const root of selectionRoots()) visit(root);
     return index;
   }
   async function indexInstancesByMainComponentKey(index) {
@@ -44,7 +46,7 @@
         for (const child of node.children) visit(child);
       }
     }
-    for (const page of figma.root.children) visit(page);
+    for (const root of selectionRoots()) visit(root);
     await Promise.all(
       instances.map(async (inst) => {
         try {
@@ -236,7 +238,7 @@
         } else {
           const leadingOwning = await getInstanceOwningKey(leadingInstance);
           if (!leadingOwning) {
-            diagnostics.push("OLD: found the leading instance but could not read its main component (getMainComponentAsync returned null \u2014 possibly detached).");
+            diagnostics.push("OLD: found the leading instance but could not read its main component (getMainComponentAsync returned null, possibly detached).");
           }
           leadingSetKey = (_a = leadingOwning == null ? void 0 : leadingOwning.key) != null ? _a : null;
         }
@@ -274,7 +276,7 @@
           diagnostics.push("Could not determine the leading's component set.");
         } else if (oldLeadingSetKey && leadingSet.key === oldLeadingSetKey) {
           diagnostics.push(
-            `This reference's leading is still on the OLD leading component set \u2014 cannot auto-resolve from it. Use "Capture selection as LEADING SET" on a confirmed-correct leading instead.`
+            `This reference's leading is still on the OLD leading component set, so it cannot be auto-resolved. Use "Capture selection as LEADING SET" on a confirmed-correct leading instead.`
           );
         } else if (oldLeadingSetKey && leadingSet.key !== oldLeadingSetKey) {
           Object.assign(leadingTypeKeys, readLeadingTypesFromSet(leadingSet));
@@ -284,7 +286,7 @@
           leadingSetKey = leadingSet.key;
         } else {
           diagnostics.push(
-            `Cannot verify this leading automatically \u2014 its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
+            `Cannot verify this leading automatically: its component set ("${leadingSet.name}") isn't named as owned by "${ref.owningName}". Capture OLD first, or use "Capture selection as LEADING SET" explicitly.`
           );
         }
       } else {
@@ -318,7 +320,6 @@
     return { mainKey: ref.owningKey, mainName: ref.owningName, leadingTypeKeys, leadingSetKey, actionKey, diagnostics };
   }
   async function scanForLeadingTypeExamples(newMainKey, leadingTypeKeys) {
-    await figma.loadAllPagesAsync();
     const instances = [];
     function visit(node) {
       if (node.type === "INSTANCE") instances.push(node);
@@ -326,7 +327,7 @@
         for (const child of node.children) visit(child);
       }
     }
-    for (const page of figma.root.children) visit(page);
+    for (const root of selectionRoots()) visit(root);
     await Promise.all(
       instances.map(async (inst) => {
         const owning = await getInstanceOwningKey(inst);
@@ -445,19 +446,26 @@
   }
   async function readLeadingSnapshot(instance) {
     const leadingWrap = findChildByStructuralName(instance, "leading");
-    if (!leadingWrap) return null;
+    if (!leadingWrap) {
+      return { leading: null, leadingDiagnostic: `no "leading" child found. Top-level children: ${childNameList(instance)}` };
+    }
     const leadingInstance = findDescendantInstance(leadingWrap);
-    if (!leadingInstance) return null;
+    if (!leadingInstance) {
+      return {
+        leading: null,
+        leadingDiagnostic: `found a "leading" child (type ${leadingWrap.type}) but it isn't/doesn't contain an instance. Its children: ${childNameList(leadingWrap)}`
+      };
+    }
     const typeProp = findProp(leadingInstance, "type");
     const type = typeProp ? String(typeProp.value).toLowerCase() : null;
     if (type === "image") {
       const img = findChildByName(leadingInstance, "image");
-      return { type: "image", imageFills: fillsSnapshot(img) };
+      return { leading: { type: "image", imageFills: fillsSnapshot(img) }, leadingDiagnostic: null };
     }
     if (type === "icon") {
       const iconNameProp = findProp(leadingInstance, "icon-name");
       const iconName = iconNameProp ? String(iconNameProp.value) : void 0;
-      return { type: "icon", iconName, iconIsDefault: !iconName || iconName === "gravity-icon-bull" };
+      return { leading: { type: "icon", iconName, iconIsDefault: !iconName || iconName === "gravity-icon-bull" }, leadingDiagnostic: null };
     }
     if (type === "avatar") {
       const initialsProp = findProp(leadingInstance, "initials");
@@ -465,22 +473,33 @@
       const pictureNode = findChildByName(leadingInstance, "gravity-avatar") || leadingInstance;
       const pictureRect = findAvatarPicture(pictureNode);
       return {
-        type: "avatar",
-        avatarInitials: initialsProp ? String(initialsProp.value) : void 0,
-        avatarPicture: pictureProp ? Boolean(pictureProp.value) : void 0,
-        avatarPictureFill: fillsSnapshot(pictureRect)
+        leading: {
+          type: "avatar",
+          avatarInitials: initialsProp ? String(initialsProp.value) : void 0,
+          avatarPicture: pictureProp ? Boolean(pictureProp.value) : void 0,
+          avatarPictureFill: fillsSnapshot(pictureRect)
+        },
+        leadingDiagnostic: null
       };
     }
     if (type === "flag") {
       const countryProp = findProp(leadingInstance, "country-name");
       const codeProp = findProp(leadingInstance, "code");
       return {
-        type: "flag",
-        flagCountryName: countryProp ? String(countryProp.value) : void 0,
-        flagCode: codeProp ? String(codeProp.value) : void 0
+        leading: {
+          type: "flag",
+          flagCountryName: countryProp ? String(countryProp.value) : void 0,
+          flagCode: codeProp ? String(codeProp.value) : void 0
+        },
+        leadingDiagnostic: null
       };
     }
-    return { type: "unknown" };
+    return {
+      leading: null,
+      leadingDiagnostic: `leading instance found but has no recognizable "type" property (raw value: ${typeProp ? String(typeProp.value) : "not found"}). Leading instance's properties: ${Object.keys(
+        leadingInstance.componentProperties || {}
+      ).join(", ")}`
+    };
   }
   function readActionSnapshot(instance, hasAction) {
     if (!hasAction) return { present: false };
@@ -507,14 +526,14 @@
     if (!metaContainer || !("children" in metaContainer)) {
       return {
         metaSlotInstance: null,
-        metaDiagnostic: `no meta-container found \u2014 top-level children: ${childNameList(instance)}`
+        metaDiagnostic: `no meta-container found. Top-level children: ${childNameList(instance)}`
       };
     }
     const metaSlot = findDescendantInstance(metaContainer);
     if (!metaSlot) {
       return {
         metaSlotInstance: null,
-        metaDiagnostic: `meta-container "${metaContainer.name}" found, but no instance inside it at all \u2014 its children: ${childNameList(metaContainer)}`
+        metaDiagnostic: `meta-container "${metaContainer.name}" found, but no instance inside it at all. Its children: ${childNameList(metaContainer)}`
       };
     }
     return { metaSlotInstance: metaSlot, metaDiagnostic: null };
@@ -546,7 +565,7 @@
     const switchesContextProp = findPropAny(instance, ["switchesContext", "switches-context"]);
     const metaBoolProp = findProp(instance, "~ meta");
     const persistentProp = findProp(instance, "persistent");
-    const leading = leadingBoolProp && leadingBoolProp.value === false ? null : await readLeadingSnapshot(instance);
+    const leadingResult = leadingBoolProp && leadingBoolProp.value === false ? { leading: null, leadingDiagnostic: null } : await readLeadingSnapshot(instance);
     const action = readActionSnapshot(instance, variant.action);
     const meta = await readMetaInfo(instance);
     return {
@@ -578,7 +597,8 @@
         meta: metaBoolProp ? Boolean(metaBoolProp.value) : null,
         persistent: persistentProp ? Boolean(persistentProp.value) : null
       },
-      leading,
+      leading: leadingResult.leading,
+      leadingDiagnostic: leadingResult.leadingDiagnostic,
       action,
       metaSlotInstance: meta.metaSlotInstance,
       metaDiagnostic: meta.metaDiagnostic
@@ -602,6 +622,14 @@
     const actionMissing = needsAction && !res.newActionKey;
     const ok = missingLeadingTypes.length === 0 && !actionMissing;
     return { ok, missingLeadingTypes, needsAction, actionMissing };
+  }
+  function describeGateFailure(gate) {
+    const parts = [];
+    if (gate.missingLeadingTypes.length > 0) {
+      parts.push(`leading type${gate.missingLeadingTypes.length === 1 ? "" : "s"} "${gate.missingLeadingTypes.join('", "')}"`);
+    }
+    if (gate.actionMissing) parts.push("the action component");
+    return `Could not resolve ${parts.join(" and ")} on gravity-list-entry-new. Make sure your selection includes an instance of gravity-list-entry-new that already uses ${parts.length > 1 ? "these" : "it"}.`;
   }
   var WIDTH_TO_SIZE = { "\u2265480px": "medium", "<480px": "small" };
   var TYPE_MAP = { bare: "bare", box: "boxed" };
@@ -825,7 +853,7 @@
     for (const { path, props } of nested) {
       const targetNode = findChildByIndexPath(target, path);
       if (!targetNode || targetNode.type !== "INSTANCE") {
-        warnings.push(`meta nested instance at [${path.join(",")}] not found post-swap \u2014 its ${Object.keys(props).length} prop(s) dropped`);
+        warnings.push(`meta nested instance at [${path.join(",")}] not found post-swap, its ${Object.keys(props).length} prop(s) dropped`);
         continue;
       }
       applyProps(targetNode, props, `meta nested [${path.join(",")}] prop`);
@@ -847,7 +875,7 @@
     for (const o of captured.styles) {
       const targetNode = findChildByIndexPath(target, o.path);
       if (!targetNode) {
-        warnings.push(`meta node [${o.path.join(",")}] "${o.name}" missing post-swap \u2014 its style overrides dropped`);
+        warnings.push(`meta node [${o.path.join(",")}] "${o.name}" missing post-swap, its style overrides dropped`);
         continue;
       }
       await applyNodeStyle(targetNode, o, warnings);
@@ -869,7 +897,7 @@
     return warnings;
   }
   async function applyMappings(target, snapshot, res, preCapturedMeta) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     const warnings = [];
     if (snapshot.variant.width) setPropByBase(target, "size", (_a = WIDTH_TO_SIZE[snapshot.variant.width]) != null ? _a : snapshot.variant.width);
     if (snapshot.variant.type) setPropByBase(target, "type", (_b = TYPE_MAP[snapshot.variant.type]) != null ? _b : snapshot.variant.type);
@@ -891,6 +919,9 @@
     if (snapshot.bool.persistent !== null) setPropByBase(target, "actions-persistent", snapshot.bool.persistent);
     if (snapshot.heading !== null) setPropByBase(target, "heading", snapshot.heading);
     if (snapshot.description !== null) setPropByBase(target, "description", snapshot.description);
+    if (snapshot.bool.leading !== false && !snapshot.leading) {
+      throw new Error(`Instance has a visible leading but its content could not be read. Refusing to migrate and silently reset it. ${(_d = snapshot.leadingDiagnostic) != null ? _d : ""}`);
+    }
     if (snapshot.leading && snapshot.leading.type !== "unknown") {
       const leadingWrap = findChildByStructuralName(target, "leading");
       const leadingInstance = leadingWrap ? findDescendantInstance(leadingWrap) : null;
@@ -920,7 +951,7 @@
         const finalOwning = await getInstanceOwningKey(leadingInstance);
         if (finalOwning && finalOwning.key === res.oldLeadingSetKey) {
           throw new Error(
-            'Leading resolved to the OLD leading set despite matching the captured key \u2014 the captured leading data is wrong. Re-run "Capture selection as LEADING SET" pointing at a confirmed-correct leading.'
+            'Leading resolved to the OLD leading set despite matching the captured key, so the captured leading data is wrong. Re-run "Capture selection as LEADING SET" pointing at a confirmed-correct leading.'
           );
         }
       }
@@ -930,19 +961,19 @@
         const fillTarget = imgInner != null ? imgInner : img;
         if (!snapshot.leading.imageFills) {
           warnings.push(
-            `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read) \u2014 new instance kept its default image`
+            `leading image: no fill was captured from the source instance (source "image" child was missing or its fills could not be read). New instance kept its default image`
           );
         } else if (!fillTarget) {
           warnings.push(
-            `leading image: new leading's "image" child not found after swap \u2014 new instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
+            `leading image: new leading's "image" child not found after swap. New instance kept its default image. Leading's children: ${childNameList(leadingInstance)}`
           );
         } else if (!("fills" in fillTarget)) {
-          warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property \u2014 new instance kept its default image`);
+          warnings.push(`leading image: found "${fillTarget.name}" but it has no fills property. New instance kept its default image`);
         } else {
           fillTarget.fills = snapshot.leading.imageFills;
           const after = fillsSnapshot(fillTarget);
           if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.imageFills)) {
-            warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick \u2014 new instance may still show its default image`);
+            warnings.push(`leading image: fill was set on "${fillTarget.name}" but didn't stick. New instance may still show its default image`);
           }
         }
       } else if (snapshot.leading.type === "icon") {
@@ -956,19 +987,19 @@
         const pictureRect = findAvatarPicture(avatarNode);
         if (!snapshot.leading.avatarPictureFill) {
           if (snapshot.leading.avatarPicture) {
-            warnings.push(`leading avatar: no picture fill was captured from the source instance \u2014 new instance kept its default picture`);
+            warnings.push(`leading avatar: no picture fill was captured from the source instance. New instance kept its default picture`);
           }
         } else if (!pictureRect) {
           warnings.push(
-            `leading avatar: new leading's "picture" node not found after swap \u2014 new instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
+            `leading avatar: new leading's "picture" node not found after swap. New instance kept its default picture. Avatar's children: ${childNameList(avatarNode)}`
           );
         } else if (!("fills" in pictureRect)) {
-          warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property \u2014 new instance kept its default picture`);
+          warnings.push(`leading avatar: found "${pictureRect.name}" but it has no fills property. New instance kept its default picture`);
         } else {
           pictureRect.fills = snapshot.leading.avatarPictureFill;
           const after = fillsSnapshot(pictureRect);
           if (JSON.stringify(after) !== JSON.stringify(snapshot.leading.avatarPictureFill)) {
-            warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick \u2014 new instance may still show its default picture`);
+            warnings.push(`leading avatar: fill was set on "${pictureRect.name}" but didn't stick. New instance may still show its default picture`);
           }
         }
       } else if (snapshot.leading.type === "flag") {
@@ -987,7 +1018,7 @@
     }
     if (snapshot.bool.meta === true && !snapshot.metaSlotInstance && !preCapturedMeta) {
       throw new Error(
-        `Instance has meta enabled but its meta slot content could not be read \u2014 refusing to migrate and silently reset it. ${(_d = snapshot.metaDiagnostic) != null ? _d : ""}`
+        `Instance has meta enabled but its meta slot content could not be read. Refusing to migrate and silently reset it. ${(_e = snapshot.metaDiagnostic) != null ? _e : ""}`
       );
     }
     if (snapshot.metaSlotInstance || preCapturedMeta) {
@@ -995,7 +1026,7 @@
       const newMetaSlot = newMetaContainer ? findDescendantInstance(newMetaContainer) : null;
       if (!newMetaSlot) {
         throw new Error(
-          `Could not preserve meta content \u2014 no instance found inside the new instance's meta-container. ${newMetaContainer ? `Its children: ${childNameList(newMetaContainer)}` : "meta-container itself not found."}`
+          `Could not preserve meta content. No instance found inside the new instance's meta-container. ${newMetaContainer ? `Its children: ${childNameList(newMetaContainer)}` : "meta-container itself not found."}`
         );
       }
       const captured = preCapturedMeta != null ? preCapturedMeta : await captureOverrides(snapshot.metaSlotInstance);
@@ -1009,7 +1040,7 @@
       return {
         sourceNodeId: snapshot.nodeId,
         status: "skipped",
-        reason: `Required leading type "${snapshot.leading.type}" could not be resolved on the new component \u2014 never falling back to a different type.`
+        reason: `Required leading type "${snapshot.leading.type}" could not be resolved on the new component. Never falling back to a different type.`
       };
     }
     if (snapshot.variant.action && !res.newActionKey) {
@@ -1044,12 +1075,18 @@
           sourceInstance.visible = snapshot.visible;
         } catch (e) {
         }
+        if (snapshot.reactions !== void 0 && "reactions" in sourceInstance) {
+          try {
+            await setViaAsyncOrAssign(sourceInstance, "setReactionsAsync", "reactions", snapshot.reactions);
+          } catch (e) {
+          }
+        }
         const warnings = await applyMappings(sourceInstance, snapshot, res, preCapturedMeta);
         const notes = [];
         if (sourceInstance.visible !== snapshot.visible) {
           try {
             sourceInstance.visible = snapshot.visible;
-            notes.push(`visibility reverted to ${!snapshot.visible} after migration \u2014 forced back to ${snapshot.visible} automatically`);
+            notes.push(`visibility reverted to ${!snapshot.visible} after migration, forced back to ${snapshot.visible} automatically`);
           } catch (err) {
             warnings.push(
               `visibility reverted to ${sourceInstance.visible} after migration (source was ${snapshot.visible}) and could not be forced back: ${err instanceof Error ? err.message : String(err)}`
@@ -1062,7 +1099,7 @@
           sourceNodeId: snapshot.nodeId,
           replacementNodeId: sourceInstance.id,
           status: warnings.length > 0 ? "manual-review" : "migrated",
-          reason: warnings.length > 0 ? `Swapped in place, but some overrides did not fully stick: ${warnings.join(" | ")}` : notes.length > 0 ? `Validated and swapped in place. ${notes.join(" | ")}` : "Validated and swapped in place (nested inside another instance \u2014 cannot be replaced as a separate node)."
+          reason: warnings.length > 0 ? `Swapped in place, but some overrides did not fully stick: ${warnings.join(" | ")}` : notes.length > 0 ? `Validated and swapped in place. ${notes.join(" | ")}` : "Validated and swapped in place (nested inside another instance, cannot be replaced as a separate node)."
         };
       } catch (err) {
         if (oldMain) {
@@ -1074,7 +1111,7 @@
         return {
           sourceNodeId: snapshot.nodeId,
           status: "failed",
-          reason: `${err instanceof Error ? err.message : String(err)} \u2014 reverted component reference; some property overrides made before the failure may remain changed.`
+          reason: `${err instanceof Error ? err.message : String(err)}. Reverted component reference; some property overrides made before the failure may remain changed.`
         };
       }
     }
@@ -1101,6 +1138,9 @@
       if (snapshot.layoutAlign && "layoutAlign" in replacement) replacement.layoutAlign = snapshot.layoutAlign;
       if (snapshot.layoutPositioning && "layoutPositioning" in replacement)
         replacement.layoutPositioning = snapshot.layoutPositioning;
+      if (snapshot.reactions !== void 0 && "reactions" in replacement) {
+        await setViaAsyncOrAssign(replacement, "setReactionsAsync", "reactions", snapshot.reactions);
+      }
       const warnings = await applyMappings(replacement, snapshot, res, preCapturedMetaTopLevel);
       const problems = await validateReplacement(replacement, snapshot, res);
       if (problems.length > 0) {
@@ -1152,7 +1192,7 @@
     const skipped = outcomes.filter((o) => o.status === "skipped" || o.status === "already-migrated").length;
     const failed = outcomes.filter((o) => o.status === "failed").length;
     const manualReview = outcomes.filter((o) => o.status === "manual-review").length;
-    const exceptionLines = outcomes.filter((o) => o.status !== "migrated").map((o) => `- ${o.sourceNodeId}${o.replacementNodeId ? ` / ${o.replacementNodeId}` : ""} \u2014 ${o.status} \u2014 ${o.reason}`).join("\n");
+    const exceptionLines = outcomes.filter((o) => o.status !== "migrated").map((o) => `- ${o.sourceNodeId}${o.replacementNodeId ? ` / ${o.replacementNodeId}` : ""}: ${o.status}, ${o.reason}`).join("\n");
     return [
       `Scope: ${scopeLabel2}`,
       `Source instances: ${sourceCount}`,
@@ -1205,8 +1245,18 @@
     };
   }
   figma.ui.onmessage = async (msg) => {
+    var _a;
     try {
       if (msg.type === "find-components") {
+        if (((_a = msg.scope) == null ? void 0 : _a.mode) === "selection" && figma.currentPage.selection.length === 0) {
+          figma.ui.postMessage({
+            type: "find-results",
+            candidates: [],
+            notes: ["Nothing selected. Select the frames or instances you want to migrate, then scan again."],
+            resolution
+          });
+          return;
+        }
         const candidates = await findComponentCandidates(msg.scope);
         const notes = [];
         for (const role of ["old", "new"]) {
@@ -1222,8 +1272,25 @@
             notes.push(`No ${label} found in the current selection.`);
           } else {
             notes.push(
-              `Found ${matches.length} different components named "${label}" \u2014 cannot pick automatically. Narrow your selection so only the correct one is included, then scan again.`
+              `Found ${matches.length} different components named "${label}". Cannot pick automatically. Narrow your selection so only the correct one is included, then scan again.`
             );
+          }
+        }
+        if ((resolution == null ? void 0 : resolution.oldMainKey) && (resolution == null ? void 0 : resolution.newMainKey)) {
+          try {
+            const previewRoots = await getScopeRoots(msg.scope);
+            const previewInstances = await collectInstances(previewRoots);
+            const { migratable: previewMigratable } = await classifyInstances(previewInstances, resolution);
+            const previewSnapshots = [];
+            for (const inst of previewMigratable) {
+              try {
+                previewSnapshots.push(await auditInstance(inst));
+              } catch (e) {
+              }
+            }
+            const gate = gateCheck(previewSnapshots, resolution);
+            if (!gate.ok) notes.push(describeGateFailure(gate));
+          } catch (e) {
           }
         }
         figma.ui.postMessage({ type: "find-results", candidates, notes, resolution });
@@ -1240,45 +1307,63 @@
         const allInstances = await collectInstances(roots);
         const { migratable, alreadyMigrated } = await classifyInstances(allInstances, resolution);
         const snapshots = [];
-        for (const inst of migratable) snapshots.push(await auditInstance(inst));
+        const auditFailures = [];
+        for (const inst of migratable) {
+          try {
+            snapshots.push(await auditInstance(inst));
+          } catch (err) {
+            auditFailures.push({
+              sourceNodeId: inst.id,
+              status: "failed",
+              reason: `Could not read this instance's current state: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+        }
         const gate = gateCheck(snapshots, resolution);
         if (!gate.ok) {
-          const parts = [];
-          if (gate.missingLeadingTypes.length > 0) {
-            parts.push(`leading type${gate.missingLeadingTypes.length === 1 ? "" : "s"} "${gate.missingLeadingTypes.join('", "')}"`);
-          }
-          if (gate.actionMissing) parts.push("the action component");
           figma.ui.postMessage({
             type: "error",
-            message: `Could not resolve ${parts.join(" and ")} on gravity-list-entry-new. Halted before making any changes \u2014 make sure your selection includes an instance of gravity-list-entry-new that already uses ${parts.length > 1 ? "these" : "it"}, then scan and migrate again.`
+            message: `${describeGateFailure(gate)} Halted before making any changes. Then scan and migrate again.`
           });
           return;
         }
-        const outcomes = alreadyMigrated.map((inst) => ({
-          sourceNodeId: inst.id,
-          status: "already-migrated",
-          reason: "Already on gravity-list-entry-new; skipped for idempotency."
-        }));
+        const outcomes = [
+          ...alreadyMigrated.map((inst) => ({
+            sourceNodeId: inst.id,
+            status: "already-migrated",
+            reason: "Already on gravity-list-entry-new; skipped for idempotency."
+          })),
+          ...auditFailures
+        ];
+        const sourceCount = migratable.length + alreadyMigrated.length;
+        const buildLiveSummary = () => {
+          const count = (...statuses) => outcomes.filter((o) => statuses.includes(o.status)).length;
+          return {
+            summary: {
+              scope: scopeLabel(scope),
+              source: sourceCount,
+              migrated: count("migrated"),
+              skipped: count("skipped", "already-migrated"),
+              failed: count("failed"),
+              manualReview: count("manual-review")
+            },
+            exceptions: outcomes.filter((o) => o.status !== "migrated").map((o) => ({ id: o.sourceNodeId, replacementId: o.replacementNodeId, status: o.status, reason: o.reason }))
+          };
+        };
         for (let i = 0; i < snapshots.length; i++) {
-          const outcome = await migrateInstance(snapshots[i], resolution);
-          outcomes.push(outcome);
-          figma.ui.postMessage({ type: "progress", done: i + 1, total: snapshots.length });
+          try {
+            outcomes.push(await migrateInstance(snapshots[i], resolution));
+          } catch (err) {
+            outcomes.push({
+              sourceNodeId: snapshots[i].nodeId,
+              status: "failed",
+              reason: `Unexpected error migrating this instance: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+          figma.ui.postMessage(__spreadValues({ type: "progress", done: i + 1, total: snapshots.length }, buildLiveSummary()));
         }
-        const report = buildReport(scopeLabel(scope), migratable.length + alreadyMigrated.length, outcomes);
-        const count = (...statuses) => outcomes.filter((o) => statuses.includes(o.status)).length;
-        figma.ui.postMessage({
-          type: "report",
-          report,
-          summary: {
-            scope: scopeLabel(scope),
-            source: migratable.length + alreadyMigrated.length,
-            migrated: count("migrated"),
-            skipped: count("skipped", "already-migrated"),
-            failed: count("failed"),
-            manualReview: count("manual-review")
-          },
-          exceptions: outcomes.filter((o) => o.status !== "migrated").map((o) => ({ id: o.sourceNodeId, replacementId: o.replacementNodeId, status: o.status, reason: o.reason }))
-        });
+        const report = buildReport(scopeLabel(scope), sourceCount, outcomes);
+        figma.ui.postMessage(__spreadValues({ type: "report", report }, buildLiveSummary()));
         return;
       }
       if (msg.type === "get-selection-name") {
